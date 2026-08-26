@@ -1,0 +1,21 @@
+{
+  "name": "release-notifier-bot",
+  "version": "3.3.0",
+  "description": "A Telegram bot on Cloudflare Workers to monitor new releases of GitHub repositories.",
+  "main": "src/index.js",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "telegram",
+    "bot",
+    "github",
+    "releases",
+    "notifier"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
