@@ -1,0 +1,20 @@
+name = "release-watcher-bot"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# متغیرهای محیطی (مقادیر رو در داشبورد یا secrets تنظیم کن)
+[vars]
+REPOS = "2dust/v2rayN,2dust/v2rayNG,diegosouzapw/OmniRoute"
+
+# KV Namespace Bindings (این‌ها رو باید در داشبورد بسازی و ID رو جایگزین کنی)
+[[kv_namespaces]]
+binding = "RELEASES"
+id = "your-releases-kv-id"   # ← ID فضای KV رو اینجا بذار
+
+[[kv_namespaces]]
+binding = "USERS"
+id = "your-users-kv-id"      # ← ID فضای KV رو اینجا بذار
+
+# Cron Trigger (هر ساعت یک بار)
+[triggers]
+crons = ["0 * * * *"]
