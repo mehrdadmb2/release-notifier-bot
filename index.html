@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#080c18">
+  <meta name="description" content="A polished live dashboard for GitHub Release Watcher — monitor repository releases and receive richly formatted Telegram alerts.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Release Watcher — Every release. One signal.">
+  <meta property="og:description" content="An elegant release-monitoring dashboard for GitHub projects, powered by Cloudflare Workers and Telegram.">
+  <meta property="og:url" content="https://mehrdadmb2.github.io/release-notifier-bot/">
+  <meta name="twitter:card" content="summary">
+  <title>Release Watcher — Every release. One signal.</title>
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/styles.css">
+  <script defer src="assets/app.js"></script>
+</head>
+<body>
+  <div class="ambient ambient--one" aria-hidden="true"></div>
+  <div class="ambient ambient--two" aria-hidden="true"></div>
+  <div class="grid-texture" aria-hidden="true"></div>
+
+  <header class="site-header" id="top">
+    <a class="brand" href="#top" aria-label="Release Watcher home">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 48 48" fill="none"><path d="M24 5.5 28.2 17l11.3 4.6-11.3 4.1L24 38.5l-4.4-12.8L8.5 21.6 19.6 17 24 5.5Z" stroke="currentColor" stroke-width="1.5"/><circle cx="24" cy="22" r="4.2" fill="currentColor"/><path d="m9 35 5-5m20 0 5 5M5 14l5 2m28 0 5-2" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/></svg>
+      </span>
+      <span class="brand-copy"><b>Release<span>Watcher</span></b><small>GITHUB RELEASE INTELLIGENCE</small></span>
+    </a>
+
+    <button class="mobile-menu-toggle" id="mobileMenuToggle" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="primaryNav">
+      <span></span><span></span><span></span>
+    </button>
+    <nav class="primary-nav" id="primaryNav" aria-label="Main navigation">
+      <a href="#watchlist">Watchlist</a>
+      <a href="#features">Capabilities</a>
+      <a href="#commands">Bot commands</a>
+      <a class="nav-github" href="https://github.com/mehrdadmb2/release-notifier-bot" target="_blank" rel="noreferrer">View source <span aria-hidden="true">↗</span></a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero section-shell" aria-labelledby="heroTitle">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="eyebrow-spark"></span> AUTOMATED RELEASE MONITORING <span class="eyebrow-line"></span></div>
+        <h1 id="heroTitle">Every release.<br><span class="gradient-text">One signal.</span></h1>
+        <p class="hero-description">Your GitHub watchlist, without the constant refreshing. Release Watcher checks repositories in the background and sends detailed release alerts straight to Telegram.</p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="#watchlist"><span>Explore watchlist</span><span class="button-arrow">↓</span></a>
+          <a class="button button-secondary" href="https://github.com/mehrdadmb2/release-notifier-bot" target="_blank" rel="noreferrer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-4.3 1.4-4.3-2.5-6-3m12 6v-3.9a3.4 3.4 0 0 0-.9-2.7c3-.3 6.1-1.5 6.1-6.7A5.2 5.2 0 0 0 18.8 5a4.8 4.8 0 0 0-.1-3.5S17.5 1.2 15 3a13.3 13.3 0 0 0-7 0C5.5 1.2 4.3 1.5 4.3 1.5A4.8 4.8 0 0 0 4.2 5a5.2 5.2 0 0 0-1.4 3.7c0 5.2 3.1 6.4 6.1 6.7a3.4 3.4 0 0 0-.9 2.7V22"/></svg> Source code <span class="external-arrow">↗</span></a>
+        </div>
+        <div class="hero-proof-row">
+          <div class="avatar-stack" aria-hidden="true"><span>GH</span><span>☁</span><span>✈</span></div>
+          <p><b>GitHub → Cloudflare → Telegram</b><br><span>A lightweight serverless pipeline</span></p>
+          <span class="hero-proof-divider"></span>
+          <span class="pulse-label"><i></i> Always on</span>
+        </div>
+      </div>
+
+      <div class="hero-visual" aria-label="Example of a rich Telegram release notification">
+        <div class="visual-orbit orbit-one"></div><div class="visual-orbit orbit-two"></div>
+        <div class="float-tag float-tag--top"><span class="float-icon">✦</span><span><b>Release detected</b><small>event-driven alert</small></span><i class="mini-live"></i></div>
+        <div class="telegram-window glass-panel">
+          <div class="telegram-topbar"><div class="telegram-avatar">RW</div><div class="telegram-account"><b>Release Watcher</b><small><span class="bot-check">✓</span> bot <span class="online-dot"></span> online</small></div><div class="telegram-more">•••</div></div>
+          <div class="telegram-body">
+            <div class="message-label">RELEASE NOTIFICATION <span>NOW</span></div>
+            <h3>🚀 New GitHub Release</h3>
+            <div class="message-rule"></div>
+            <div class="message-field"><span class="field-icon">📦</span><span><small>REPOSITORY</small><code>WhiteDNS/WhiteDNS-Android</code></span></div>
+            <div class="message-field"><span class="field-icon">🏷️</span><span><small>VERSION</small><code class="version-chip">v2.8.1</code></span></div>
+            <div class="message-field"><span class="field-icon">📅</span><span><small>PUBLISHED</small><code>17 Oct 2026 · 10:30 UTC</code></span></div>
+            <div class="quote-preview"><div class="quote-mark">“</div><div><b>Release notes</b><p>A clean summary of the release, preserved in a Telegram quote block.</p></div></div>
+            <div class="message-downloads"><span>📎 3 DOWNLOAD ASSETS</span><i></i><i></i><i></i></div>
+            <div class="telegram-buttons"><span>↗ Open release</span><span>↓ Download</span></div>
+          </div>
+          <div class="telegram-footer"><span>HTML formatting</span><span>Encrypted token storage <b>◆</b></span></div>
+        </div>
+        <div class="float-tag float-tag--bottom"><span class="terminal-mini">&gt;_</span><span><b>Zero dashboard babysitting</b><small>scheduled checks · KV memory</small></span></div>
+        <div class="visual-cross cross-one">✳</div><div class="visual-cross cross-two">+</div>
+      </div>
+    </section>
+
+    <section class="metrics section-shell" aria-label="Live service metrics">
+      <div class="metric-card"><span class="metric-icon icon-cyan">⌘</span><div><b id="metricRepos">08</b><span>Tracked repositories</span></div><i class="metric-spark"></i></div>
+      <div class="metric-card"><span class="metric-icon icon-violet">↻</span><div><b>15<span class="metric-unit"> min</span></b><span>Scheduled checks</span></div><i class="metric-spark spark-violet"></i></div>
+      <div class="metric-card"><span class="metric-icon icon-green">◈</span><div><b id="metricReleases">—</b><span>Known release tags</span></div><i class="metric-spark spark-green"></i></div>
+      <div class="metric-card"><span class="metric-icon icon-orange">♙</span><div><b id="metricUsers">—</b><span>Subscribed chats</span></div><i class="metric-spark spark-orange"></i></div>
+    </section>
+
+    <section class="watchlist-section section-shell section-space" id="watchlist" aria-labelledby="watchlistTitle">
+      <div class="section-heading watchlist-heading">
+        <div><div class="section-kicker"><span>01</span> THE WATCHLIST</div><h2 id="watchlistTitle">Your releases, <span class="gradient-text">in orbit.</span></h2><p>One place to scan every monitored project, open its releases, and check the latest stored version.</p></div>
+        <div class="sync-status" id="syncStatus" data-state="loading"><span class="sync-dot"></span><span><b id="syncLabel">Connecting to Worker</b><small id="syncTime">Loading last known snapshot…</small></span><button type="button" id="refreshButton" class="icon-button" aria-label="Refresh watchlist snapshot" title="Refresh snapshot">↻</button></div>
+      </div>
+
+      <div class="watchlist-toolbar glass-panel">
+        <label class="search-field" for="repoSearch"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg><input id="repoSearch" type="search" placeholder="Search by repository or owner…" autocomplete="off"><kbd>⌕</kbd></label>
+        <div class="filter-group" role="group" aria-label="Filter repositories">
+          <button type="button" class="filter-chip is-active" data-filter="all" aria-pressed="true">All <span id="countAll">08</span></button>
+          <button type="button" class="filter-chip" data-filter="released" aria-pressed="false">Version known</button>
+          <button type="button" class="filter-chip" data-filter="pending" aria-pressed="false">Pending</button>
+        </div>
+        <label class="sort-select"><span>Sort</span><select id="sortSelect" aria-label="Sort repositories"><option value="default">Default order</option><option value="name">Name A–Z</option><option value="owner">Owner A–Z</option><option value="tag">Version known first</option></select></label>
+      </div>
+
+      <div class="watchlist-meta"><span><i class="meta-live-dot"></i> <b id="resultCount">8 repositories</b> configured for monitoring</span><span class="mono-meta">AUTO-CHECK <b>0 * * * *</b></span></div>
+      <div class="repo-grid" id="repoGrid" aria-live="polite" aria-busy="true">
+        <article class="repo-skeleton"></article><article class="repo-skeleton"></article><article class="repo-skeleton"></article><article class="repo-skeleton"></article>
+      </div>
+      <div class="empty-state" id="emptyState" hidden><span>⌕</span><h3>No matching repositories</h3><p>Try another search term or clear the active filter.</p><button type="button" class="button button-secondary" id="clearFilters">Clear filters</button></div>
+      <div class="watchlist-footnote"><span class="footnote-icon">ⓘ</span><p>Version labels are the latest release values stored by the Worker during a scheduled check. Open GitHub for the upstream release page. Projects without a published stable GitHub Release can still be monitored.</p></div>
+    </section>
+
+    <section class="features-section section-shell section-space" id="features" aria-labelledby="featuresTitle">
+      <div class="section-heading"><div><div class="section-kicker"><span>02</span> BUILT FOR SIGNAL</div><h2 id="featuresTitle">Less polling. <span class="gradient-text">More clarity.</span></h2><p>Rich release details delivered in a compact, readable format — backed by persistent state, reliable fallbacks, and a public status dashboard.</p></div><div class="heading-stamp"><span>RW</span><small>WORKER<br>EDITION 4.0</small></div></div>
+      <div class="feature-grid">
+        <article class="feature-card feature-card--large tilt-card"><div class="feature-topline"><span class="feature-symbol symbol-cyan">⌘</span><span class="feature-index">CAPABILITY / 01</span></div><h3>Formatting with purpose.</h3><p>Notifications use Telegram-supported HTML entities — not unsupported visual tricks — for clear hierarchy and better copyability.</p><div class="format-demo"><div class="format-row"><span class="format-token">B</span><b>Important release headline</b><small>bold</small></div><div class="format-row"><span class="format-token token-mono">&lt;&gt;</span><code>owner/project · v4.2.0</code><small>monospace</small></div><div class="format-row"><span class="format-token token-quote">❝</span><blockquote>A short release note stays visually separated from the metadata.</blockquote><small>quote</small></div><div class="format-row"><span class="format-token token-link">↗</span><a href="https://core.telegram.org/bots/api#formatting-options" target="_blank" rel="noreferrer">Direct release and download links</a><small>links</small></div></div></article>
+        <article class="feature-card tilt-card"><div class="feature-topline"><span class="feature-symbol symbol-violet">◉</span><span class="feature-index">CAPABILITY / 02</span></div><h3>State that survives.</h3><p>Cloudflare KV remembers release tags and subscribers across Worker executions. First deployment can establish a quiet baseline instead of blasting old releases.</p><div class="state-diagram"><div class="state-node"><span>GH</span><b>GitHub API</b><small>latest release</small></div><span class="diagram-line"></span><div class="state-node node-violet"><span>KV</span><b>Persistent state</b><small>tag + check status</small></div></div><div class="feature-footer"><span class="status-mini"><i></i> Durable by design</span><span>02 stores</span></div></article>
+        <article class="feature-card tilt-card"><div class="feature-topline"><span class="feature-symbol symbol-green">↻</span><span class="feature-index">CAPABILITY / 03</span></div><h3>Automatic by default.</h3><p>A scheduled Worker checks the configured repositories every hour. The dashboard reads the last stored snapshot without hammering GitHub on every page visit.</p><div class="schedule-visual"><div class="schedule-ring"><span>1<small>HR</small></span></div><div class="schedule-copy"><b>Always watching</b><small>Scheduled trigger</small><div class="schedule-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div></div><div class="feature-footer"><span class="status-mini"><i></i> Serverless monitoring</span><span>Cloudflare</span></div></article>
+        <article class="feature-card feature-card--wide tilt-card"><div class="feature-topline"><span class="feature-symbol symbol-orange">↗</span><span class="feature-index">CAPABILITY / 04</span></div><div class="wide-feature-body"><div><h3>From alert to artifact.</h3><p>Each message can include release notes, version tags, publish time, asset sizes, and tap-ready buttons to open the release or download an asset — with a plain-text fallback if Telegram rejects markup.</p><div class="wide-pills"><span>Inline code</span><span>Block quotes</span><span>Release assets</span><span>Fallback delivery</span></div></div><div class="artifact-stack" aria-hidden="true"><div class="artifact-card artifact-back"><span>ZIP</span><b>source archive</b><small>28.4 MB</small></div><div class="artifact-card artifact-front"><span>APK</span><b>app-release.apk</b><small>42.8 MB <i>↓</i></small></div><div class="artifact-glow"></div></div></div></article>
+      </div>
+    </section>
+
+    <section class="commands-section section-shell section-space" id="commands" aria-labelledby="commandsTitle">
+      <div class="section-heading"><div><div class="section-kicker"><span>03</span> TELEGRAM COMMAND DECK</div><h2 id="commandsTitle">One command <span class="gradient-text">away.</span></h2><p>Start a private chat with your bot and use these commands to query the watchlist on demand.</p></div></div>
+      <div class="command-layout">
+        <div class="command-list glass-panel">
+          <div class="command-list-header"><span class="terminal-dot red"></span><span class="terminal-dot yellow"></span><span class="terminal-dot green"></span><b>COMMANDS.TXT</b><span class="command-count">06 commands</span></div>
+          <div class="command-item"><code>/start</code><span><b>Subscribe</b><small>Register for release alerts and see the watchlist.</small></span><button class="copy-command" data-copy="/start" aria-label="Copy /start">⧉</button></div>
+          <div class="command-item"><code>/help</code><span><b>Help menu</b><small>View a guide to all available commands.</small></span><button class="copy-command" data-copy="/help" aria-label="Copy /help">⧉</button></div>
+          <div class="command-item"><code>/repos</code><span><b>Watchlist</b><small>Show tracked repositories and known versions.</small></span><button class="copy-command" data-copy="/repos" aria-label="Copy /repos">⧉</button></div>
+          <div class="command-item"><code>/latest</code><span><b>Release overview</b><small>Fetch a live snapshot across all configured repositories.</small></span><button class="copy-command" data-copy="/latest" aria-label="Copy /latest">⧉</button></div>
+          <div class="command-item"><code>/latest owner/repo</code><span><b>Single repository</b><small>Get full release notes, assets, and direct buttons.</small></span><button class="copy-command" data-copy="/latest owner/repo" aria-label="Copy single repository command">⧉</button></div>
+          <div class="command-item"><code>/status</code><span><b>System status</b><small>Check subscriber count, release snapshots, and errors.</small></span><button class="copy-command" data-copy="/status" aria-label="Copy /status">⧉</button></div>
+          <div class="command-item"><code>/stop</code><span><b>Unsubscribe</b><small>Stop delivery; use /start to return later.</small></span><button class="copy-command" data-copy="/stop" aria-label="Copy /stop">⧉</button></div>
+        </div>
+        <aside class="setup-card"><div class="setup-orbit" aria-hidden="true"></div><div class="setup-icon">✦</div><div class="section-kicker">QUICK START</div><h3>Make it yours.</h3><p>Deploy the Worker, connect your bot token, and keep your KV namespace IDs. This repository includes the Worker source, Wrangler configuration, and this GitHub Pages dashboard.</p><div class="setup-step"><span>01</span><div><b>Configure secrets</b><small>Bot token + setup secrets</small></div></div><div class="setup-step"><span>02</span><div><b>Deploy with Wrangler</b><small>Keep existing KV IDs</small></div></div><div class="setup-step"><span>03</span><div><b>Set the webhook</b><small>Register commands automatically</small></div></div><a class="button button-primary setup-link" href="https://github.com/mehrdadmb2/release-notifier-bot#deployment" target="_blank" rel="noreferrer">Read deployment guide <span>↗</span></a></aside>
+      </div>
+    </section>
+
+    <section class="architecture-section section-shell section-space" aria-labelledby="architectureTitle">
+      <div class="architecture-card glass-panel"><div class="architecture-copy"><div class="section-kicker"><span>04</span> SIMPLE PIPELINE · STRONG STATE</div><h2 id="architectureTitle">A signal path, <span class="gradient-text">not a maze.</span></h2><p>GitHub provides release metadata. The Worker compares tag state in KV. Telegram gets the notification only when a new release is detected.</p><a class="text-link" href="https://github.com/mehrdadmb2/release-notifier-bot" target="_blank" rel="noreferrer">Explore the implementation <span>↗</span></a></div><div class="pipeline" aria-label="GitHub API to Cloudflare Worker to Telegram and GitHub Pages"><div class="pipeline-step"><span class="pipeline-logo logo-github">GH</span><b>GitHub</b><small>Release API</small></div><span class="pipeline-connector"><i></i><small>fetch</small></span><div class="pipeline-step pipeline-worker"><span class="pipeline-logo logo-cloud">☁</span><b>Cloudflare</b><small>Worker + KV</small></div><span class="pipeline-connector"><i></i><small>alert</small></span><div class="pipeline-step"><span class="pipeline-logo logo-telegram">➤</span><b>Telegram</b><small>Rich messages</small></div><div class="pipeline-pages"><span>▦</span><b>GitHub Pages</b><small>Live status dashboard</small></div></div></div>
+    </section>
+
+    <section class="final-cta section-shell"><div class="cta-spark cta-spark-one"></div><div class="cta-spark cta-spark-two"></div><div class="cta-content"><div class="section-kicker"><span>KEEP AN EYE ON THE SIGNAL</span></div><h2>Never miss the <span class="gradient-text">next release.</span></h2><p>Open the repository, deploy the Worker, and start following your projects with less manual checking.</p><div class="hero-actions cta-actions"><a class="button button-primary" href="https://github.com/mehrdadmb2/release-notifier-bot" target="_blank" rel="noreferrer">Open GitHub repository <span>↗</span></a><a class="button button-secondary" href="#watchlist">Back to watchlist ↑</a></div></div><div class="cta-orb" aria-hidden="true"><div class="cta-orb-inner">✦</div><span class="cta-orbit-dot dot-a"></span><span class="cta-orbit-dot dot-b"></span><span class="cta-orbit-dot dot-c"></span></div></section>
+  </main>
+
+  <footer class="site-footer section-shell"><a class="footer-brand" href="#top"><span class="brand-mark small-mark">✦</span><span><b>ReleaseWatcher</b><small>EVERY RELEASE. ONE SIGNAL.</small></span></a><p>Built on GitHub Releases, Cloudflare Workers, and Telegram Bot API.</p><div class="footer-links"><a href="https://github.com/mehrdadmb2/release-notifier-bot" target="_blank" rel="noreferrer">GitHub ↗</a><a href="https://core.telegram.org/bots/api" target="_blank" rel="noreferrer">Telegram API ↗</a><a href="https://developers.cloudflare.com/workers/" target="_blank" rel="noreferrer">Cloudflare Workers ↗</a></div><div class="footer-bottom"><span>© <span id="currentYear">2026</span> Release Watcher</span><span class="footer-live"><i></i><span id="footerStatus">Dashboard ready</span></span><span class="footer-version">BUILD <b>4.0.0</b></span></div></footer>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

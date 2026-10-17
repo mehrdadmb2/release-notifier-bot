@@ -1,21 +1,29 @@
 {
   "name": "release-notifier-bot",
-  "version": "3.3.0",
-  "description": "A Telegram bot on Cloudflare Workers to monitor new releases of GitHub repositories.",
+  "version": "4.0.0",
+  "private": true,
+  "description": "A Cloudflare Worker and Telegram bot that monitors GitHub releases, with a responsive GitHub Pages dashboard.",
   "main": "src/index.js",
+  "type": "module",
   "scripts": {
+    "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "tail": "wrangler tail",
+    "check": "node --check src/index.js && node --check assets/app.js && node --check tests/worker.smoke.test.mjs",
+    "test": "node --test"
   },
   "keywords": [
-    "cloudflare",
-    "workers",
-    "telegram",
-    "bot",
-    "github",
-    "releases",
-    "notifier"
+    "cloudflare-workers",
+    "github-releases",
+    "telegram-bot",
+    "release-notifier",
+    "github-pages",
+    "kv-storage",
+    "automation"
   ],
-  "author": "Your Name",
-  "license": "MIT"
+  "author": "mehrdadmb2",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
 }

@@ -1,20 +1,29 @@
 name = "release-watcher-bot"
 main = "src/index.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2025-09-01"
+workers_dev = true
 
-# متغیرهای محیطی (مقادیر رو در داشبورد یا secrets تنظیم کن)
 [vars]
-REPOS = "2dust/v2rayN,2dust/v2rayNG,diegosouzapw/OmniRoute"
+# Keep the existing repositories and append new owner/repo values separated by commas.
+REPOS = "2dust/v2rayN,2dust/v2rayNG,diegosouzapw/OmniRoute,WhiteDNS/WhiteDNS-Android,shirokhorshid/shirokhorshid-android,KNG7-P/Se7en-Pro,therealaleph/MasterHttpRelayVPN-RUST,anonvector/SlipNet"
+NOTIFY_ON_FIRST_SEEN = "false"
+PUBLIC_SITE_ORIGIN = "https://mehrdadmb2.github.io"
+PUBLIC_SITE_URL = "https://mehrdadmb2.github.io/release-notifier-bot/"
 
-# KV Namespace Bindings (این‌ها رو باید در داشبورد بسازی و ID رو جایگزین کنی)
+# CRITICAL: Replace these two placeholders with the IDs of the EXISTING namespaces
+# attached to your currently deployed Worker. Do not create new namespaces when
+# you need to preserve the existing subscriber list and release history.
 [[kv_namespaces]]
 binding = "RELEASES"
-id = "your-releases-kv-id"   # ← ID فضای KV رو اینجا بذار
+id = "REPLACE_WITH_EXISTING_RELEASES_KV_NAMESPACE_ID"
 
 [[kv_namespaces]]
 binding = "USERS"
-id = "your-users-kv-id"      # ← ID فضای KV رو اینجا بذار
+id = "REPLACE_WITH_EXISTING_USERS_KV_NAMESPACE_ID"
 
-# Cron Trigger (هر ساعت یک بار)
 [triggers]
+# Every 60 minutes. Keep this aligned with the bot's help/status text.
 crons = ["0 * * * *"]
+
+[observability]
+enabled = true
