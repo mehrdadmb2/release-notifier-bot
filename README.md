@@ -17,8 +17,9 @@
 
 ### Telegram notifications
 
-- Clear HTML-formatted release cards with bold headings, monospace repository names and versions, quoted release notes, timestamps, direct GitHub links, asset names and file sizes.
+- Detailed HTML-formatted release cards with bold headings, monospace repository names and versions, quoted paragraphs, Markdown headings/lists/links, inline code, fenced code blocks, full UTC timestamps, direct GitHub links, asset names and file sizes.
 - Inline Telegram buttons to open the release, open the repository, or download the first asset.
+- Long changelogs are delivered as multiple size-safe Telegram messages (without cutting HTML tags/entities in half), with action buttons attached to the final part; release descriptions are truncated only after a generous 6,500-character safety cap.
 - Escaped untrusted text and a plain-text fallback if Telegram rejects formatting.
 - A first-run baseline: existing release tags are stored silently by default instead of sending a burst of old notifications.
 - Existing KV values that contain only a release tag are still understood; state is gradually written in the newer structured format.
@@ -30,7 +31,7 @@
 | `/start` | Register the chat and show the monitored repositories |
 | `/help` | Show the bot command guide |
 | `/repos` | List watch targets and their last known state |
-| `/latest` | Fetch a live snapshot across configured repositories |
+| `/latest` | Fetch a live snapshot across configured repositories with title, timestamp, notes preview, and asset count |
 | `/latest owner/repo` | Fetch full details for a single repository; GitHub URLs are accepted too |
 | `/status` | Display subscriber count, stored release count, last check, and errors |
 | `/stop` | Unsubscribe the chat |

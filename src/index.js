@@ -25,8 +25,10 @@ const DEFAULT_REPOS = [
 const SERVICE_NAME = 'GitHub Release Watcher';
 const API_TIMEOUT_MS = 10_000;
 const TELEGRAM_TEXT_LIMIT = 4096;
-const MAX_RELEASE_NOTE_LENGTH = 1_150;
-const MAX_ASSETS_IN_MESSAGE = 5;
+const TELEGRAM_CHUNK_TARGET = 3800;
+const MAX_RELEASE_NOTE_LENGTH = 6_500;
+const MAX_ASSETS_IN_MESSAGE = 12;
+const MAX_CODE_BLOCK_CHUNK = 2_800;
 
 class NoPublishedReleaseError extends Error {
   constructor(repo) {
@@ -345,7 +347,7 @@ async function githubRequest(url, retries = 2) {
       const response = await fetch(url, {
         method: 'GET',
         headers: {
-          'User-Agent': 'Release-Notifier-Bot/4.0 (Cloudflare Workers)',
+          'User-Agent': 'Release-Notifier-Bot/4.1 (Cloudflare Workers)',
           'Accept': 'application/vnd.github+json',
           'X-GitHub-Api-Version': '2022-11-28',
         },
@@ -430,32 +432,104 @@ async function telegramCall(token, method, payload, canRetry429 = true) {
   }
 }
 
+function splitTelegramHtml(html, limit = TELEGRAM_CHUNK_TARGET) {
+  const text = String(html ?? '').trim();
+  if (!text) return [''];
+  if (text.length <= limit) return [text];
+
+  // Split only at newlines that are outside HTML tags. This keeps each message's
+  // Telegram HTML balanced and avoids cutting links/code entities in half.
+  const safeBreaks = [];
+  const stack = [];
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '<') {
+      const end = text.indexOf('>', i + 1);
+      if (end !== -1) {
+        const tagText = text.slice(i, end + 1);
+        const match = tagText.match(/^<\s*(\/)?\s*([a-zA-Z][\w-]*)\b[^>]*>$/);
+        if (match) {
+          const closing = Boolean(match[1]);
+          const tagName = match[2].toLowerCase();
+          if (closing) {
+            const index = stack.lastIndexOf(tagName);
+            if (index !== -1) stack.splice(index, 1);
+          } else if (!/\/\s*>$/.test(tagText) && !['br', 'hr', 'img', 'meta', 'link', 'input'].includes(tagName)) {
+            stack.push(tagName);
+          }
+        }
+        i = end;
+        continue;
+      }
+    }
+    if (text[i] === '\n' && stack.length === 0) safeBreaks.push(i + 1);
+  }
+
+  const chunks = [];
+  let start = 0;
+  while (text.length - start > limit) {
+    let end = 0;
+    for (const point of safeBreaks) {
+      if (point > start && point - start <= limit) end = point;
+      if (point - start > limit) break;
+    }
+    // A long single block should already be split by markdownToTelegramBlocks.
+    // If other callers provide an unusually long line, prefer the next balanced
+    // boundary up to Telegram's hard limit rather than cutting HTML mid-tag.
+    if (!end) {
+      end = safeBreaks.find((point) => point > start && point - start <= TELEGRAM_TEXT_LIMIT) || 0;
+    }
+    if (!end) {
+      // Last-resort fallback for an unexpected giant plain-text line. Avoid
+      // cutting inside a tag; split at the nearest space before the hard limit.
+      const hardEnd = Math.min(start + limit, text.length);
+      let candidate = text.lastIndexOf(' ', hardEnd);
+      if (candidate <= start + Math.floor(limit * 0.5)) candidate = hardEnd;
+      end = candidate;
+    }
+    const chunk = text.slice(start, end).trim();
+    if (chunk) chunks.push(chunk);
+    start = end;
+    while (start < text.length && text[start] === '\n') start += 1;
+  }
+  const remainder = text.slice(start).trim();
+  if (remainder) chunks.push(remainder);
+  return chunks.length ? chunks : [text.slice(0, limit)];
+}
+
 async function sendTelegramMessage(token, chatId, text, extra = {}) {
-  const htmlText = String(text ?? '').slice(0, TELEGRAM_TEXT_LIMIT);
-  const payload = {
-    chat_id: chatId,
-    text: htmlText,
-    parse_mode: 'HTML',
-    disable_web_page_preview: true,
-    ...extra,
-  };
-  try {
-    return await telegramCall(token, 'sendMessage', payload);
-  } catch (error) {
-    if (/can't parse entities|parse entities|unsupported start tag|unsupported end tag/i.test(error.message || '')) {
-      console.warn(`Telegram rejected HTML for chat ${chatId}; retrying as plain text.`);
-      try {
-        const plainPayload = { ...payload, text: htmlToPlainText(htmlText).slice(0, TELEGRAM_TEXT_LIMIT) };
-        delete plainPayload.parse_mode;
-        return await telegramCall(token, 'sendMessage', plainPayload);
-      } catch (fallbackError) {
-        console.error(`Plain-text Telegram fallback failed for ${chatId}:`, fallbackError.message);
+  const chunks = splitTelegramHtml(String(text ?? ''));
+  let lastResult = null;
+  for (let index = 0; index < chunks.length; index += 1) {
+    const isLast = index === chunks.length - 1;
+    const payload = {
+      chat_id: chatId,
+      text: chunks[index],
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      ...(isLast ? extra : {}),
+    };
+    try {
+      lastResult = await telegramCall(token, 'sendMessage', payload);
+    } catch (error) {
+      if (/can't parse entities|parse entities|unsupported start tag|unsupported end tag/i.test(error.message || '')) {
+        console.warn(`Telegram rejected HTML for chat ${chatId}; retrying this part as plain text.`);
+        try {
+          const plainPayload = { ...payload, text: htmlToPlainText(chunks[index]).slice(0, TELEGRAM_TEXT_LIMIT) };
+          delete plainPayload.parse_mode;
+          lastResult = await telegramCall(token, 'sendMessage', plainPayload);
+        } catch (fallbackError) {
+          console.error(`Plain-text Telegram fallback failed for ${chatId}:`, fallbackError.message);
+          return null;
+        }
+      } else {
+        console.error(`Telegram send failed for ${chatId}:`, error.message);
         return null;
       }
     }
-    console.error(`Telegram send failed for ${chatId}:`, error.message);
-    return null;
+    // Keep multi-part release messages within Telegram's per-chat send rate.
+    if (!isLast) await sleep(1_050);
   }
+  return lastResult;
 }
 
 function releaseKeyboard(repo, release) {
@@ -472,69 +546,241 @@ function releaseKeyboard(repo, release) {
   return { inline_keyboard: rows };
 }
 
+function formatInlineMarkdown(value) {
+  const protectedParts = [];
+  const protect = (html) => {
+    const marker = `ZZTGPLACEHOLDER${protectedParts.length}ZZ`;
+    protectedParts.push(html);
+    return marker;
+  };
+  let text = String(value ?? '');
+  const plainLabel = (label) => label.replace(/ZZTGPLACEHOLDER(\d+)ZZ/g, (_match, index) =>
+    htmlToPlainText(protectedParts[Number(index)] || '').replace(/\s+/g, ' ').trim());
+  const containsProtectedCode = (fragment) => [...fragment.matchAll(/ZZTGPLACEHOLDER(\d+)ZZ/g)]
+    .some((match) => /<(?:code|pre)\b/i.test(protectedParts[Number(match[1])] || ''));
+
+  // Protect code first so Markdown syntax inside code is never interpreted.
+  text = text.replace(/`([^`\n]+)`/g, (_match, code) => protect(`<code>${escapeHtml(code)}</code>`));
+  text = text.replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)(?:\s+"[^"]*")?\)/gi, (_match, alt, url) => {
+    const safeUrl = safeHttpsUrl(url, '');
+    const safeAlt = plainLabel(alt || 'Open image');
+    return protect(safeUrl
+      ? `🖼 <a href="${escapeHtml(safeUrl)}">${escapeHtml(safeAlt)}</a>`
+      : `🖼 ${escapeHtml(safeAlt || 'Image')}`);
+  });
+  text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)(?:\s+"[^"]*")?\)/gi, (_match, label, url) => {
+    const safeUrl = safeHttpsUrl(url, '');
+    const safeLabel = escapeHtml(plainLabel(label));
+    return protect(safeUrl ? `<a href="${escapeHtml(safeUrl)}">${safeLabel}</a>` : safeLabel);
+  });
+  text = text.replace(/<((?:https?):\/\/[^\s>]+)>/gi, (_match, url) => {
+    const safeUrl = safeHttpsUrl(url, '');
+    return protect(safeUrl ? `<a href="${escapeHtml(safeUrl)}">${escapeHtml(url)}</a>` : escapeHtml(url));
+  });
+  // Convert bare HTTPS links too, without consuming common trailing punctuation.
+  text = text.replace(/https?:\/\/[^\s<>()\]]+/gi, (candidate) => {
+    const trailing = (candidate.match(/[.,!?;:]+$/) || [''])[0];
+    const url = candidate.slice(0, candidate.length - trailing.length);
+    const safeUrl = safeHttpsUrl(url, '');
+    if (!safeUrl) return candidate;
+    return `${protect(`<a href="${escapeHtml(safeUrl)}">${escapeHtml(url)}</a>`)}${trailing}`;
+  });
+
+  text = escapeHtml(text);
+  text = text.replace(/\*\*(.+?)\*\*/g, (_match, inside) => containsProtectedCode(inside) ? inside : `<b>${inside}</b>`);
+  text = text.replace(/__(.+?)__/g, (_match, inside) => containsProtectedCode(inside) ? inside : `<b>${inside}</b>`);
+  text = text.replace(/~~(.+?)~~/g, (_match, inside) => containsProtectedCode(inside) ? inside : `<s>${inside}</s>`);
+  text = text.replace(/(^|[\s(])\*([^*\n]+)\*(?=$|[\s).,!?:;])/g, (_match, before, inside) => `${before}${containsProtectedCode(inside) ? inside : `<i>${inside}</i>`}`);
+
+  return text.replace(/ZZTGPLACEHOLDER(\d+)ZZ/g, (_match, index) => protectedParts[Number(index)] ?? '');
+}
+
+function formatMarkdownQuote(value) {
+  const formatted = formatInlineMarkdown(value);
+  // Telegram does not permit code/pre or links to be nested inside a blockquote.
+  return /<(?:a|code|pre)\b/i.test(formatted) ? formatted : `<blockquote>${formatted}</blockquote>`;
+}
+
+function splitLongCode(text, maxEscapedLength = MAX_CODE_BLOCK_CHUNK) {
+  const source = String(text ?? '').replace(/\r\n?/g, '\n');
+  const chunks = [];
+  let pending = '';
+  let pendingEscapedLength = 0;
+  for (const character of source) {
+    const escapedLength = escapeHtml(character).length;
+    if (pending && pendingEscapedLength + escapedLength > maxEscapedLength) {
+      chunks.push(pending);
+      pending = '';
+      pendingEscapedLength = 0;
+    }
+    pending += character;
+    pendingEscapedLength += escapedLength;
+  }
+  if (pending || !chunks.length) chunks.push(pending);
+  return chunks;
+}
+
+function markdownToTelegramBlocks(markdown) {
+  const source = truncateText(markdown, MAX_RELEASE_NOTE_LENGTH).replace(/\r\n?/g, '\n');
+  if (!source.trim()) return [];
+  const lines = source.split('\n');
+  const blocks = [];
+  let paragraph = [];
+  let inFence = false;
+  let fenceLanguage = '';
+  let codeLines = [];
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    const joined = paragraph.join(' ').trim();
+    paragraph = [];
+    if (!joined) return;
+    // HTML escaping can expand &, < and > up to fivefold; keep each formatted
+    // paragraph comfortably below Telegram's 4096-character hard limit.
+    const maxBlock = 600;
+    for (let offset = 0; offset < joined.length; offset += maxBlock) {
+      blocks.push(formatMarkdownQuote(joined.slice(offset, offset + maxBlock)));
+    }
+  };
+  const flushCode = () => {
+    const code = codeLines.join('\n');
+    codeLines = [];
+    if (fenceLanguage) blocks.push(`🧩 <i>Code block · ${escapeHtml(fenceLanguage)}</i>`);
+    for (const piece of splitLongCode(code)) {
+      blocks.push(`<pre><code>${escapeHtml(piece)}</code></pre>`);
+    }
+  };
+
+  for (const line of lines) {
+    const fence = line.match(/^\s*(```+|~~~+)\s*([A-Za-z0-9_+.-]{0,24})?.*$/);
+    if (fence && !inFence) {
+      flushParagraph();
+      inFence = true;
+      fenceLanguage = fence[2] || '';
+      codeLines = [];
+      continue;
+    }
+    if (inFence) {
+      if (/^\s*(```+|~~~+)\s*$/.test(line)) {
+        flushCode();
+        inFence = false;
+        fenceLanguage = '';
+      } else {
+        codeLines.push(line);
+      }
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushParagraph();
+      continue;
+    }
+
+    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      const formattedHeading = formatInlineMarkdown(heading[2].trim());
+      blocks.push(/<(?:code|pre)\b/i.test(formattedHeading) ? `📌 ${formattedHeading}` : `📌 <b>${formattedHeading}</b>`);
+      continue;
+    }
+    if (/^\s{0,3}([-*_]\s*){3,}$/.test(line)) {
+      flushParagraph();
+      blocks.push('──────────────');
+      continue;
+    }
+    const quote = line.match(/^\s{0,3}>\s?(.*)$/);
+    if (quote) {
+      flushParagraph();
+      blocks.push(formatMarkdownQuote(quote[1]));
+      continue;
+    }
+    const bullet = line.match(/^\s{0,8}[-*+]\s+(.+)$/);
+    if (bullet) {
+      flushParagraph();
+      blocks.push(`• ${formatInlineMarkdown(bullet[1])}`);
+      continue;
+    }
+    const ordered = line.match(/^\s{0,8}(\d{1,3})[.)]\s+(.+)$/);
+    if (ordered) {
+      flushParagraph();
+      blocks.push(`<code>${ordered[1]}.</code> ${formatInlineMarkdown(ordered[2])}`);
+      continue;
+    }
+    // Readable representation of Markdown tables instead of a wall of pipes.
+    if (/^\s*\|?.+\|.+\|?\s*$/.test(line) && line.includes('|')) {
+      flushParagraph();
+      const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
+      if (cells.length && cells.every((cell) => /^:?-{3,}:?$/.test(cell))) continue;
+      blocks.push(`• ${cells.map((cell) => formatInlineMarkdown(cell)).join('  ·  ')}`);
+      continue;
+    }
+    paragraph.push(line.trim());
+  }
+  if (inFence) flushCode();
+  flushParagraph();
+  if (source.length >= MAX_RELEASE_NOTE_LENGTH) blocks.push('<i>… release notes shortened to fit the message sequence.</i>');
+  return blocks;
+}
+
+function fullUtcTimestamp(value) {
+  if (!value) return 'Unknown';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 'Unknown' : date.toUTCString();
+}
+
 function buildReleaseMessage(repo, release) {
   const tag = release.tag_name || 'untagged';
   const repoUrl = `https://github.com/${repo}`;
   const releaseUrl = safeHttpsUrl(release.html_url, `${repoUrl}/releases`);
-  const published = dateLabel(release.published_at || release.created_at);
-  const releaseName = truncateText(release.name || tag, 140);
+  const published = fullUtcTimestamp(release.published_at || release.created_at);
+  const releaseName = truncateText(release.name || tag, 160);
   const notes = truncateText(release.body || '', MAX_RELEASE_NOTE_LENGTH);
+  const assets = Array.isArray(release.assets) ? release.assets.filter((asset) => asset && asset.browser_download_url) : [];
+  const totalBytes = assets.reduce((sum, asset) => sum + Math.max(0, Number(asset.size || 0)), 0);
   const lines = [
-    '🚀 <b>NEW GITHUB RELEASE</b>',
-    '━━━━━━━━━━━━━━━━━━━━━━',
-    `📦 <b>Repository</b>  <a href="${escapeHtml(repoUrl)}">${escapeHtml(repo)}</a>`,
-    `🏷️ <b>Version</b>  <code>${escapeHtml(tag)}</code>`,
-    `📝 <b>Release</b>  ${escapeHtml(releaseName)}`,
-    `📅 <b>Published</b>  <code>${escapeHtml(published)}</code>`,
-    `🧭 <b>Channel</b>  ${release.prerelease ? 'Pre-release' : 'Stable release'}`,
-    '━━━━━━━━━━━━━━━━━━━━━━',
+    '🚀 <b>NEW RELEASE PUBLISHED!</b>',
+    '━━━━━━━━━━━━━━━━━━━━━━━━━',
+    `📦 <b>Repository:</b> <code>${escapeHtml(repo)}</code> · <a href="${escapeHtml(repoUrl)}">Open repository</a>`,
+    `🏷️ <b>Version:</b> <code>${escapeHtml(tag)}</code>`,
+    `📝 <b>Release:</b> ${escapeHtml(releaseName)}`,
+    `📅 <b>Published:</b> <code>${escapeHtml(published)}</code>`,
+    `🧭 <b>Channel:</b> ${release.prerelease ? 'Pre-release' : 'Stable release'}`,
+    '━━━━━━━━━━━━━━━━━━━━━━━━━',
+    '',
+    '📝 <b>Description / Changelog</b>',
   ];
 
   if (notes) {
-    lines.push('💬 <b>Release notes</b>');
-    lines.push(`<blockquote>${escapeHtml(notes)}</blockquote>`);
+    lines.push(...markdownToTelegramBlocks(notes));
   } else {
-    lines.push('💬 <i>No release notes were provided.</i>');
+    lines.push('<i>No release notes were provided.</i>');
   }
 
-  const assets = Array.isArray(release.assets) ? release.assets.filter((asset) => asset && asset.browser_download_url) : [];
-  lines.push('', `📎 <b>Downloads</b>  <code>${assets.length}</code> asset${assets.length === 1 ? '' : 's'}`);
+  lines.push(
+    '',
+    '━━━━━━━━━━━━━━━━━━━━━━━━━',
+    `🔗 <b>Download Links</b> · <code>${assets.length}</code> file(s) · <code>${(totalBytes / 1024 / 1024).toFixed(2)} MB</code> total`,
+  );
   if (assets.length) {
     for (const asset of assets.slice(0, MAX_ASSETS_IN_MESSAGE)) {
-      const size = `${(Number(asset.size || 0) / 1024 / 1024).toFixed(2)} MB`;
-      const label = truncateText(asset.name || 'Download', 48);
+      const size = `${(Math.max(0, Number(asset.size || 0)) / 1024 / 1024).toFixed(2)} MB`;
+      const label = truncateText(asset.name || 'Download', 100);
       lines.push(`• <a href="${escapeHtml(safeHttpsUrl(asset.browser_download_url, releaseUrl))}">${escapeHtml(label)}</a> <code>${size}</code>`);
     }
     if (assets.length > MAX_ASSETS_IN_MESSAGE) {
-      lines.push(`• <i>and ${assets.length - MAX_ASSETS_IN_MESSAGE} more asset(s)</i>`);
+      lines.push(`• <i>And ${assets.length - MAX_ASSETS_IN_MESSAGE} more file(s). Open the full release page to see every asset.</i>`);
     }
   } else {
-    lines.push('• No downloadable assets attached.');
+    lines.push('• <i>No downloadable assets attached.</i>');
   }
-
-  lines.push('', `🔗 <a href="${escapeHtml(releaseUrl)}"><b>View full release on GitHub</b></a>`);
-  let message = lines.join('\n');
-  if (message.length > TELEGRAM_TEXT_LIMIT) {
-    const maxNotes = 350;
-    const shorterNotes = truncateText(release.body || '', maxNotes);
-    message = lines.filter((line) => !line.startsWith('<blockquote>')).join('\n');
-    if (shorterNotes) {
-      const insertion = message.indexOf('💬 <b>Release notes</b>');
-      if (insertion >= 0) {
-        const before = message.slice(0, insertion + '💬 <b>Release notes</b>'.length);
-        const after = message.slice(insertion + '💬 <b>Release notes</b>'.length);
-        message = `${before}\n<blockquote>${escapeHtml(shorterNotes)}</blockquote>${after}`;
-      }
-    }
-    message = message.slice(0, TELEGRAM_TEXT_LIMIT - 8).trimEnd();
-  }
-  return message;
+  lines.push('', `🌐 <a href="${escapeHtml(releaseUrl)}"><b>View full release on GitHub</b></a>`);
+  return lines.join('\n');
 }
 
 async function buildSingleLatestResponse(repo) {
   try {
     const release = await getLatestRelease(repo);
-    const message = buildReleaseMessage(repo, release).replace('🚀 <b>NEW GITHUB RELEASE</b>', '📡 <b>LATEST RELEASE SNAPSHOT</b>');
+    const message = buildReleaseMessage(repo, release).replace('🚀 <b>NEW RELEASE PUBLISHED!</b>', '📡 <b>LATEST RELEASE DETAILS</b>');
     return { message, keyboard: releaseKeyboard(repo, release) };
   } catch (error) {
     if (error instanceof NoPublishedReleaseError) {
@@ -563,10 +809,17 @@ async function buildAllLatestResponse(env) {
     try {
       const release = await getLatestRelease(repo);
       const state = releaseStateFromApi(release);
+      const repoUrl = `https://github.com/${repo}`;
+      const releaseUrl = safeHttpsUrl(release.html_url, `${repoUrl}/releases`);
+      const title = truncateText(release.name || state.tag, 100);
+      const assets = Array.isArray(release.assets) ? release.assets.filter((asset) => asset && asset.browser_download_url) : [];
+      const preview = markdownToTelegramBlocks(truncateText(release.body || '', 240)).slice(0, 2);
       return [
-        `📦 <a href="https://github.com/${escapeHtml(repo)}"><b>${escapeHtml(repo)}</b></a>`,
-        `   🏷 <code>${escapeHtml(state.tag)}</code>  ·  ${escapeHtml(dateLabel(state.publishedAt))}`,
-        `   🔗 <a href="${escapeHtml(state.htmlUrl || `https://github.com/${repo}/releases`)}">Open release</a>`,
+        `📦 <a href="${escapeHtml(repoUrl)}"><b>${escapeHtml(repo)}</b></a>`,
+        `📝 ${escapeHtml(title)}`,
+        `🏷️ <code>${escapeHtml(state.tag)}</code> · <code>${escapeHtml(fullUtcTimestamp(state.publishedAt))}</code>`,
+        ...preview,
+        `📎 <code>${assets.length}</code> downloadable asset(s) · <a href="${escapeHtml(releaseUrl)}">Open full release</a>`,
       ].join('\n');
     } catch (error) {
       if (error instanceof NoPublishedReleaseError) {
@@ -575,15 +828,15 @@ async function buildAllLatestResponse(env) {
       return `📦 <code>${escapeHtml(repo)}</code>\n   ⚠️ <i>Could not fetch right now</i>`;
     }
   }));
-  const output = [
+  return [
     '🛰️ <b>WATCHTOWER · LATEST RELEASES</b>',
-    '<i>Live snapshot from GitHub Releases</i>',
+    '<i>Live snapshot from GitHub Releases, including release notes previews.</i>',
     '━━━━━━━━━━━━━━━━━━━━━━',
     ...summaries.flatMap((item, index) => index === 0 ? [item] : ['', '────────────────────', item]),
     '',
     `🗂 <b>Monitored repositories:</b> <code>${repos.length}</code>`,
+    '💡 Use <code>/latest owner/repo</code> to receive the full changelog and download list.',
   ].join('\n');
-  return output.slice(0, TELEGRAM_TEXT_LIMIT - 8);
 }
 
 function buildHelpMessage() {
@@ -722,7 +975,7 @@ async function buildOverview(env) {
   return {
     ok: true,
     service: SERVICE_NAME,
-    version: '4.0.0',
+    version: '4.1.0',
     generatedAt: new Date().toISOString(),
     lastChecked: checkedTimes.at(-1) || null,
     userCount: users,
@@ -918,5 +1171,5 @@ function buildWorkerLanding(env, requestUrl) {
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>Release Watcher · Worker Status</title>
 <style>
 :root{color-scheme:dark;--bg:#070b16;--panel:#10182b;--line:rgba(166,190,255,.16);--text:#eef3ff;--muted:#9aa9c8;--cyan:#55e6ff;--violet:#a78bfa}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(ellipse at 20% 15%,#162a4d 0,transparent 44%),radial-gradient(ellipse at 90% 85%,#272053 0,transparent 42%),var(--bg);font:16px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;color:var(--text)}main{max-width:740px;width:100%;padding:clamp(24px,5vw,48px);border:1px solid var(--line);border-radius:30px;background:linear-gradient(135deg,rgba(22,34,59,.94),rgba(12,17,32,.86));box-shadow:0 35px 100px #0008,inset 0 1px #ffffff0c;position:relative;overflow:hidden}main:before{content:"";position:absolute;right:-100px;top:-100px;width:280px;height:280px;border-radius:50%;background:var(--cyan);filter:blur(100px);opacity:.15;pointer-events:none}.mark{width:64px;height:64px;display:grid;place-items:center;border:1px solid #55e6ff55;border-radius:20px;background:linear-gradient(135deg,#55e6ff24,#a78bfa23);font-size:30px}.eyebrow{margin:22px 0 8px;color:var(--cyan);font-size:12px;font-weight:800;letter-spacing:.18em;text-transform:uppercase}h1{font-size:clamp(32px,6vw,54px);line-height:1.05;letter-spacing:-.05em;margin:0}p{color:var(--muted);max-width:570px}.pill{display:inline-flex;align-items:center;gap:9px;margin-top:16px;border:1px solid #52f2af40;background:#40dfa912;border-radius:99px;padding:7px 12px;color:#83f6c3;font-weight:700;font-size:13px}.dot{width:7px;height:7px;border-radius:50%;background:#59f0ad;box-shadow:0 0 12px #59f0ad}.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:28px 0}.stat{padding:17px;border:1px solid var(--line);border-radius:17px;background:#ffffff04}.stat b{font-size:24px;display:block}.stat span{font-size:12px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}.actions{display:flex;gap:12px;flex-wrap:wrap}.actions a{color:var(--text);text-decoration:none;padding:12px 16px;border:1px solid var(--line);border-radius:13px;background:#ffffff08;font-weight:700}.actions a.primary{background:linear-gradient(110deg,#55e6ff,#a78bfa);border:0;color:#07111e}.foot{font-size:12px;margin-top:28px;color:#7888a8}@media(max-width:500px){main{border-radius:22px}.stats{grid-template-columns:1fr 1fr}.actions a{flex:1;text-align:center}}
-</style></head><body><main><div class="mark">🛰️</div><div class="eyebrow">Cloudflare edge service</div><h1>Release Watcher<br>is online.</h1><p>The Worker endpoint is responding. Scheduled checks monitor your configured GitHub repositories and deliver release alerts through Telegram.</p><div class="pill"><span class="dot"></span> Worker response healthy</div><div class="stats"><div class="stat"><b>${repoCount}</b><span>Configured repositories</span></div><div class="stat"><b>60 min</b><span>Scheduled interval</span></div></div><div class="actions"><a class="primary" href="${escapeHtml(siteUrl)}">Open dashboard ↗</a><a href="https://github.com/mehrdadmb2/release-notifier-bot">Source code ↗</a><a href="/health">Health JSON ↗</a></div><div class="foot">${host} · GitHub Release Watcher v4.0.0 · Do not share setup secrets.</div></main></body></html>`;
+</style></head><body><main><div class="mark">🛰️</div><div class="eyebrow">Cloudflare edge service</div><h1>Release Watcher<br>is online.</h1><p>The Worker endpoint is responding. Scheduled checks monitor your configured GitHub repositories and deliver release alerts through Telegram.</p><div class="pill"><span class="dot"></span> Worker response healthy</div><div class="stats"><div class="stat"><b>${repoCount}</b><span>Configured repositories</span></div><div class="stat"><b>60 min</b><span>Scheduled interval</span></div></div><div class="actions"><a class="primary" href="${escapeHtml(siteUrl)}">Open dashboard ↗</a><a href="https://github.com/mehrdadmb2/release-notifier-bot">Source code ↗</a><a href="/health">Health JSON ↗</a></div><div class="foot">${host} · GitHub Release Watcher v4.1.0 · Do not share setup secrets.</div></main></body></html>`;
 }
