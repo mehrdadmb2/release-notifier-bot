@@ -1,40 +1,41 @@
-# راهنمای نصب و جایگزینی نسخهٔ 4.1
+# راهنمای نصب و جایگزینی Release Watcher v5.0
 
-این نسخه شامل Worker، ربات تلگرام، داشبورد GitHub Pages و تست‌های خودکار است. زمان بررسی پیش‌فرض را **ساعتی** نگه داشته‌ام تا رفتار نسخهٔ قبلی عوض نشود و تعداد درخواست‌های GitHub API بی‌دلیل افزایش پیدا نکند.
+این بسته نسخهٔ کامل Worker، بات تلگرام، GitHub Pages، GitHub Actions و تست‌ها را دارد. معماری جدید طوری تنظیم شده که فقط Triggerهای مشخص‌شده اسکن واقعی GitHub را اجرا کنند؛ تمام درخواست‌های نمایشی از دیتای ذخیره‌شده استفاده می‌کنند.
 
-## قبل از هر کاری: از KVهای فعلی محافظت کن
+## نکتهٔ حیاتی: KV فعلی را حفظ کن
 
-مهم‌ترین نکته این است که فهرست مشترکین و نسخه‌های ثبت‌شده داخل Cloudflare KV نگهداری می‌شوند. فایل `wrangler.toml` داخل بسته عمداً به‌جای ID واقعی دو فضای KV، مقدارهای زیر را دارد:
+برای جلوگیری از حذف شدن مشترکین و داده‌های قبلی، از همان دو Namespace فعلی Cloudflare استفاده می‌کنیم:
 
-- `REPLACE_WITH_EXISTING_RELEASES_KV_NAMESPACE_ID`
-- `REPLACE_WITH_EXISTING_USERS_KV_NAMESPACE_ID`
+- `RELEASES`: دیتای Release، مشخصات Repository، تاریخچه نسخه، Snapshot روزانه و وضعیت اسکن
+- `USERS`: فهرست Chat IDهای مشترک بات
 
-**قبل از Deploy باید هر دو را با ID واقعی Namespaceهای متصل به Worker فعلی جایگزین کنی.** در Cloudflare Dashboard وارد **Workers & Pages → release-watcher-bot → Settings → Bindings** شو و IDهای Bindingهای `RELEASES` و `USERS` را بردار. این دو فضای فعلی را حذف یا با فضای جدید جایگزین نکن؛ در غیر این صورت ممکن است تاریخچهٔ انتشارها و فهرست کاربران قبلی قابل‌دسترسی نباشند.
+در فایل `wrangler.toml` این دو مقدار عمداً placeholder هستند:
 
-## ۱. فایل‌ها را در ریپو جایگزین کن
+```toml
+[[kv_namespaces]]
+binding = "RELEASES"
+id = "REPLACE_WITH_EXISTING_RELEASES_KV_NAMESPACE_ID"
 
-1. فایل ZIP را استخراج کن.
-2. از ریپوی فعلی یک نسخهٔ پشتیبان بگیر.
-3. فایل‌های استخراج‌شده را در ریشهٔ ریپوی `release-notifier-bot` کپی کن و فایل‌های موجود را با نسخه‌های جدید جایگزین کن.
-4. `wrangler.toml` را باز کن و دو KV ID واقعی را وارد کن.
-5. مطمئن شو مقدار `name = "release-watcher-bot"` و آدرس Worker موردنظر همان Worker فعلی است.
-
-مخزن‌های تحت نظر در متغیر `REPOS` از قبل تنظیم شده‌اند:
-
-```text
-2dust/v2rayN
-2dust/v2rayNG
-diegosouzapw/OmniRoute
-WhiteDNS/WhiteDNS-Android
-shirokhorshid/shirokhorshid-android
-KNG7-P/Se7en-Pro
-therealaleph/MasterHttpRelayVPN-RUST
-anonvector/SlipNet
+[[kv_namespaces]]
+binding = "USERS"
+id = "REPLACE_WITH_EXISTING_USERS_KV_NAMESPACE_ID"
 ```
 
-## ۲. تست محلی و آماده‌سازی Wrangler
+قبل از Deploy باید ID واقعی Namespaceهای متصل به Worker فعلی را در Cloudflare Dashboard از مسیر **Workers & Pages → release-watcher-bot → Settings → Bindings** برداری و جایگزین کنی. اگر IDهای واقعی در فایل فعلی سیستم تو وجود دارد، همان IDها را بدون تغییر نگه دار. Namespace جدید نساز و Binding را rename نکن؛ این دو کار می‌تواند باعث شود Worker به دیتابیس خالی وصل شود و مشترکین قبلی را نبیند.
 
-در PowerShell وارد پوشهٔ پروژه شو:
+## ۱. جایگزینی فایل‌ها در GitHub
+
+1. از ریپوی فعلی یک ZIP یا Clone پشتیبان تهیه کن.
+2. ZIP نسخهٔ v5.0 را Extract کن.
+3. همهٔ فایل‌ها و پوشه‌ها از جمله `.github/workflows/`، `src/` و `assets/` را در ریشهٔ ریپوی `release-notifier-bot` جایگزین کن.
+4. فایل `wrangler.toml` را باز کن و فقط دو KV ID را با مقادیر واقعی خودت تکمیل کن.
+5. مقدار `name` و آدرس Worker را بررسی کن؛ این نسخه برای Worker فعلی `release-watcher-bot` تنظیم شده است.
+
+فهرست پیش‌فرض ۸ ریپو از قبل در `REPOS` قرار دارد و داشبورد فهرست را مستقیم از Worker دریافت می‌کند.
+
+## ۲. تست محلی و ورود به Wrangler
+
+در PowerShell وارد پوشه پروژه شو:
 
 ```powershell
 npm install
@@ -43,42 +44,57 @@ npm run check
 npm test
 ```
 
-هر سه تست خودکار باید موفق شوند. آن‌ها با Mock اجرا می‌شوند و انتشار واقعی در GitHub یا پیامی در تلگرام ایجاد نمی‌کنند.
+هر سه تست فعلی باید موفق شوند. تست‌ها از Mock استفاده می‌کنند و به API واقعی GitHub یا Telegram پیام ارسال نمی‌کنند.
 
-## ۳. Secretهای Cloudflare را تنظیم کن
+## ۳. تنظیم Secretهای Cloudflare
 
-هر دستور را اجرا کن و مقدار را فقط در ورودی تعاملی Wrangler وارد کن. توکن‌ها را داخل سورس، `wrangler.toml` یا ریپوی GitHub قرار نده.
+این Secretها را در محیط Worker ثبت کن. Wrangler هنگام اجرای هر دستور ورودی امن می‌گیرد؛ مقدار را داخل فایل‌ها یا پیام عمومی قرار نده:
 
 ```powershell
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
 npx wrangler secret put SET_WEBHOOK_SECRET
 npx wrangler secret put CHECK_SECRET
-```
-
-برای هر Secret مقدار قوی و مجزا انتخاب کن. `TELEGRAM_WEBHOOK_SECRET` باید فقط از حروف انگلیسی، عدد، `_` و `-` ساخته شده و ۱ تا ۲۵۶ کاراکتر باشد.
-
-برای فعال‌کردن دستور مدیریتی `/check` در تلگرام، شناسهٔ عددی چت مدیر را هم به‌صورت Secret ثبت کن؛ اگر چند مدیر داری، شناسه‌ها را با ویرگول جدا کن:
-
-```powershell
 npx wrangler secret put ADMIN_CHAT_IDS
 ```
 
-اگر این گزینه را تنظیم نکنی، `/check` برای کاربران عادی اجرا نمی‌شود. بررسی خودکار Cron مستقل از این دستور ادامه پیدا می‌کند.
+توضیحات:
 
-## ۴. Deploy با Wrangler
+- `TELEGRAM_BOT_TOKEN`: توکن BotFather.
+- `TELEGRAM_WEBHOOK_SECRET`: مقدار تصادفی برای اعتبارسنجی درخواست‌های ورودی تلگرام؛ استفاده از آن توصیه می‌شود.
+- `SET_WEBHOOK_SECRET`: رمز مستقل برای راه‌اندازی Webhook.
+- `CHECK_SECRET`: کلید اصلی اجرای اسکن از API و داشبورد.
+- `ADMIN_CHAT_IDS`: شناسه عددی چت مدیر یا مدیران. برای چند مدیر، IDها را با ویرگول جدا کن، مثلاً `123456789,987654321`.
 
-پس از واردکردن IDهای KV واقعی و تنظیم Secretها:
+`GITHUB_TOKEN` اختیاری است. برای ۸ ریپوی عمومی، معمولاً API عمومی GitHub کافی است؛ در صورت افزایش تعداد ریپوها یا برخورد با Rate Limit، یک Fine-grained Personal Access Token با دسترسی فقط خواندن Metadata و Contents/Release ریپوهای موردنیاز بساز و در Worker ذخیره کن:
+
+```powershell
+npx wrangler secret put GITHUB_TOKEN
+```
+
+این توکن را در GitHub Pages، JavaScript یا `wrangler.toml` قرار نده.
+
+## ۴. Deploy Worker
+
+پس از جایگزینی KV IDها و تنظیم Secretها:
 
 ```powershell
 npm run deploy
 ```
 
-Cron در `wrangler.toml` برابر `0 * * * *` است؛ یعنی یک بار در هر ساعت. نسخهٔ اولیهٔ موجود در KV به‌صورت پیش‌فرض بی‌سروصدا ثبت می‌شود تا هنگام اولین اجرا اعلان انبوه از انتشارهای قدیمی ارسال نشود. انتشار جدید بعدی اعلان ایجاد می‌کند.
+در v5.0 عمداً هیچ `[triggers] crons` در `wrangler.toml` نداریم. اسکن دوره‌ای فقط از GitHub Actions اجرا می‌شود تا یک اسکن هم‌زمان از Cron کلادفلر و Action اتفاق نیفتد.
 
-## ۵. Webhook تلگرام را فعال کن
+بررسی سلامت Worker:
 
-بعد از Deploy، این دستورات را مستقیماً در PowerShell اجرا کن. هنگام درخواست ورودی، مقدار Secret مربوط به `SET_WEBHOOK_SECRET` را بده:
+```powershell
+Invoke-RestMethod "https://release-watcher-bot.game-developer-mb.workers.dev/health"
+```
+
+در پاسخ باید `ok: true` و عبارت `GitHub Actions daily + authenticated manual scan` را ببینی.
+
+## ۵. راه‌اندازی Telegram Webhook
+
+بعد از Deploy این دستور را در PowerShell اجرا کن:
 
 ```powershell
 $setupSecret = Read-Host "Enter SET_WEBHOOK_SECRET"
@@ -87,55 +103,143 @@ Invoke-RestMethod -Method Post `
   -Headers @{ "X-Setup-Secret" = $setupSecret }
 ```
 
-خروجی موفق باید شامل `ok: true` باشد. همین درخواست، Webhook تلگرام و منوی دستورات ربات را ثبت می‌کند.
+خروجی موفق باید `ok: true` داشته باشد. همین درخواست Webhook و Command Menu ربات را ثبت می‌کند؛ منوی جدید شامل `/check` هم هست.
 
-## ۶. بررسی دستی و لاگ‌ها
+## ۶. فعال‌کردن اسکن روزانه GitHub Actions
 
-برای اجرای یک بررسی فوری و احراز هویت‌شده:
+در GitHub ریپو برو به:
+
+**Settings → Secrets and variables → Actions → New repository secret**
+
+یک Secret با این نام بساز:
+
+```text
+WORKER_CHECK_SECRET
+```
+
+مقدارش باید دقیقاً با `CHECK_SECRET` که در مرحله ۳ برای Cloudflare Worker ثبت کردی یکسان باشد. مقدار این کلید را در فایل workflow قرار نده.
+
+فایل زیر در بسته اضافه شده است:
+
+```text
+.github/workflows/daily-repository-scan.yml
+```
+
+این Workflow هر روز ساعت `02:17 UTC` اجرا می‌شود و به `POST /check` درخواست احراز هویت‌شده می‌فرستد. برای اجرای دستی:
+
+1. وارد تب **Actions** ریپو شو.
+2. Workflow با نام **Daily repository scan** را انتخاب کن.
+3. روی **Run workflow** کلیک کن.
+
+در GitHub ممکن است اجرای زمان‌بندی‌شده در ساعات پرترافیک با کمی تأخیر شروع شود؛ `workflow_dispatch` برای اجرای فوری در دسترس است. مطمئن شو GitHub Actions در ریپو غیرفعال نشده باشد.
+
+## ۷. اولین اسکن و پر کردن دیتابیس
+
+بعد از Deploy و تنظیم `WORKER_CHECK_SECRET` یکی از این مسیرها را انتخاب کن:
+
+**روش پیشنهادی از داشبورد:**
+
+1. صفحه GitHub Pages را باز کن.
+2. روی **Run repository scan** بزن.
+3. مقدار `CHECK_SECRET` را در پنجره وارد کن.
+4. منتظر نتیجه اسکن بمان؛ بعد از تکمیل، داشبورد Snapshot جدید را از Worker می‌خواند.
+
+یا از تلگرام (فقط مدیران مجاز):
+
+```text
+/check
+```
+
+یا از PowerShell:
 
 ```powershell
 $checkSecret = Read-Host "Enter CHECK_SECRET"
 Invoke-RestMethod -Method Post `
   -Uri "https://release-watcher-bot.game-developer-mb.workers.dev/check" `
-  -Headers @{ "X-Check-Secret" = $checkSecret }
+  -Headers @{ "X-Check-Secret" = $checkSecret; "X-Scan-Source" = "powershell-manual" }
 ```
 
-مشاهدهٔ لاگ‌های زنده:
+در اولین اسکن، Worker نسخه فعلی را بدون اعلان انبوه به‌عنوان Baseline ذخیره می‌کند و در صورت امکان نسخه پایدار قبلی را هم از فهرست Releaseهای GitHub پیدا می‌کند. پس از آن، هر تغییر Tag به شکل `previous → current` ثبت و به مشترکین اعلان می‌شود.
 
-```powershell
-npx wrangler tail
-```
+## ۸. رفتار دقیق دکمه‌ها و دستورها
 
-مسیر وضعیت سرویس هم در دسترس است:
+| عملیات | اسکن واقعی GitHub؟ | توضیح |
+| --- | --- | --- |
+| باز کردن سایت | خیر | فقط Snapshot از KV دریافت می‌شود |
+| Refresh Snapshot | خیر | فقط `/api/overview` را دوباره می‌خواند |
+| باز کردن جزئیات هر Repo | خیر | تاریخچه و آمار ذخیره‌شده را نمایش می‌دهد |
+| `/repos` | خیر | وضعیت و نسخه‌های ذخیره‌شده |
+| `/latest` | خیر | خلاصه تمام Releaseهای ذخیره‌شده |
+| `/latest owner/repo` | خیر | changelog و assetهای نسخه ذخیره‌شده |
+| `/status` | خیر | وضعیت آخرین اسکن ذخیره‌شده |
+| `/check` در تلگرام | بله | فقط IDهای موجود در `ADMIN_CHAT_IDS` |
+| Run repository scan در سایت | بله | نیازمند `CHECK_SECRET` است |
+| GitHub Action روزانه | بله | تنها Trigger زمان‌بندی‌شده |
+| GitHub Actions → Run workflow | بله | Trigger دستی دوم |
 
-`https://release-watcher-bot.game-developer-mb.workers.dev/health`
+**نکته:** به‌روزرسانی جزئیات صفحه یا زدن Refresh باعث مصرف API سهمیه GitHub نمی‌شود. فقط مسیرهای اسکن واقعی با GitHub ارتباط می‌گیرند.
 
-## ۷. فعال‌کردن GitHub Pages
+## ۹. فعال‌سازی GitHub Pages
 
-1. تغییرات فایل‌ها را به Branch اصلی (`main`) ریپو Push کن.
-2. در GitHub وارد **Settings → Pages** شو.
-3. از بخش **Build and deployment** گزینهٔ **Deploy from a branch** را انتخاب کن.
-4. Branch را روی `main` و پوشه را روی `/(root)` قرار بده و Save کن.
-5. بعد از تکمیل Deployment صفحه را باز کن:
+1. فایل‌ها را روی Branch اصلی ریپو Push کن.
+2. وارد **Settings → Pages** شو.
+3. گزینه **Deploy from a branch** را انتخاب کن.
+4. Branch اصلی و پوشه `/(root)` را انتخاب و Save کن.
+5. بعد از اتمام Deployment این آدرس را باز کن:
 
 `https://mehrdadmb2.github.io/release-notifier-bot/`
 
-داشبورد از مسیر `/api/overview` روی Worker دادهٔ ذخیره‌شده را می‌خواند. در صورت نمایش `Using static watchlist` یا `Worker API unavailable`، ابتدا مسیر `/health` را بررسی کن و بعد لاگ‌های Worker را ببین. مقدار `PUBLIC_SITE_ORIGIN` باید دقیقاً `https://mehrdadmb2.github.io` باشد.
+در `wrangler.toml` مقدار `PUBLIC_SITE_ORIGIN` باید فقط Origin باشد، نه مسیر کامل صفحه:
 
-## ۸. تست ربات تلگرام
+```text
+https://mehrdadmb2.github.io
+```
 
-در گفت‌وگوی خصوصی ربات این فرمان‌ها را امتحان کن:
+آدرس Worker در ابتدای `assets/app.js` تنظیم شده است. اگر بعداً Worker hostname را تغییر دادی، مقدار `WORKER_BASE` را هم با آن هماهنگ کن.
 
-- `/start` ثبت اشتراک
-- `/help` راهنمای دستورات
-- `/repos` فهرست مخزن‌ها و آخرین وضعیت ثبت‌شده
-- `/latest` دریافت خلاصهٔ زنده از همهٔ مخزن‌ها
-- `/latest WhiteDNS/WhiteDNS-Android` اطلاعات کامل یک مخزن
-- `/status` تعداد کاربران، مخزن‌ها و وضعیت آخرین بررسی
-- `/stop` لغو اشتراک
+## ۱۰. مدل ذخیره‌سازی و حفظ تاریخچه
 
-در پیام انتشار، نام مخزن و نسخه با monospace، تیترها و فهرست‌ها، لینک‌های Markdown، کد inline، کدبلاک‌ها، نقل‌قول‌ها، زمان کامل UTC و جزئیات فایل‌های دانلود ارائه می‌شوند. متن‌های طولانی به چند پیام معتبر تلگرام تقسیم می‌شوند تا توضیحات بی‌صدا بریده نشوند؛ دکمه‌های انتشار در پیام آخر قرار می‌گیرند. فرمان `/latest` نیز برای هر مخزن پیش‌نمایش توضیحات و تعداد فایل‌ها را نشان می‌دهد؛ برای changelog کامل از `/latest owner/repo` استفاده کن.
+همان Namespace فعلی `RELEASES` حفظ شده و کلیدهای جدید به آن افزوده شده‌اند:
 
-## نکته دربارهٔ ریپوی GitHub
+| Key prefix | محتوا |
+| --- | --- |
+| `release:owner/repo` | آخرین Release به همراه changelog، assets و `previousTag` |
+| `check:owner/repo` | زمان و نتیجه آخرین بررسی و منبع Trigger |
+| `repo:owner/repo` | Metadata فعلی Repository |
+| `history:owner/repo` | تاریخچه نسخه‌ها (حداکثر ۱۰۰ رکورد) |
+| `snapshots:owner/repo` | آمار روزانه (حداکثر ۱۸۰ روز) |
+| `meta:last-scan` | خلاصه آخرین اجرای سراسری |
 
-نسخهٔ عمومی ریپو در حال حاضر `wrangler.toml` با IDهای placeholder داشته است. من نمی‌توانم از بیرون IDهای واقعی Bindingهای Worker حساب Cloudflare تو را ببینم؛ باید آن‌ها را از تنظیمات Worker فعلی برداری. **قبل از اصلاح این دو ID، `wrangler deploy` را اجرا نکن.**
+هر Snapshot روزانه بر اساس تاریخ UTC یکتا است؛ چند اسکن دستی در یک روز رکوردهای تکراری ایجاد نمی‌کنند و همان روز را به‌روزرسانی می‌کنند. مقادیر قدیمی `release:` نیز قابل خواندن هستند و هنگام اولین اسکن جدید به ساختار تازه تبدیل می‌شوند.
+
+## ۱۱. تست نهایی
+
+```powershell
+npm run check
+npm test
+npx wrangler tail
+```
+
+موارد زیر را بررسی کن:
+
+- [ ] Worker با Bindingهای واقعی `RELEASES` و `USERS` Deploy شده است.
+- [ ] `/health` مقدار `ok: true` برمی‌گرداند.
+- [ ] Telegram Webhook با موفقیت ثبت شده و `/start` پاسخ می‌دهد.
+- [ ] `WORKER_CHECK_SECRET` در GitHub Actions برابر `CHECK_SECRET` در Cloudflare است.
+- [ ] Workflow روزانه در تب Actions قابل مشاهده و Run دستی است.
+- [ ] اولین اسکن با `checked` موفق تمام شده و KV برای Repoها داده دارد.
+- [ ] داشبورد `Worker connected` نشان می‌دهد و نسخه قبلی/فعلی و جزئیات Repo را نمایش می‌دهد.
+- [ ] Refresh Snapshot هیچ اسکن جدیدی اجرا نمی‌کند.
+- [ ] پس از تغییر Release در یکی از ریپوها، پیام تلگرام هر دو نسخه قبلی و جدید را نشان می‌دهد.
+
+## بازیابی و عیب‌یابی
+
+- **سایت خالی یا `Worker API unavailable`:** ابتدا `/health` را باز کن. سپس `RELEASES` binding و ID آن را بررسی کن. بعد از تغییر Bindingها یک اسکن دستی اجرا کن.
+- **همه داده‌ها خالی هستند:** احتمالاً Worker به Namespace خالی یا اشتباه متصل شده است. ID Namespace قبلی را بازیابی کن؛ ساختن یک KV جدید داده‌های قبلی را برنمی‌گرداند.
+- **GitHub Action با 401 شکست می‌خورد:** مقدار `WORKER_CHECK_SECRET` در GitHub را با `CHECK_SECRET` در Worker مقایسه کن.
+- **GitHub Action با خطای 404 مواجه می‌شود:** آدرس `WORKER_URL` در Workflow و نام Worker را بررسی کن.
+- **یک Repo وضعیت `not-found` دارد:** املای `owner/repo`، عمومی/خصوصی بودن ریپو و دسترسی `GITHUB_TOKEN` را بررسی کن.
+- **خطای Rate Limit:** در Worker یک `GITHUB_TOKEN` معتبر با دسترسی خواندن اضافه کن و تعداد ریپوها را بازبینی کن.
+- **ربات پیام نمی‌دهد:** `TELEGRAM_BOT_TOKEN`، Webhook، `TELEGRAM_WEBHOOK_SECRET` و لاگ‌های `npx wrangler tail` را بررسی کن.
+
+هیچ‌کدام از Secretها را در GitHub Pages، JavaScript سمت کاربر یا فایل‌های عمومی قرار نده.

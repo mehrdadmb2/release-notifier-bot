@@ -19,6 +19,16 @@
   <script defer src="assets/app.js"></script>
 </head>
 <body>
+  <div class="app-loader" id="appLoader" role="status" aria-live="polite" aria-label="Loading Release Watcher">
+    <div class="loader-backdrop"></div>
+    <div class="loader-core">
+      <div class="loader-emblem"><span>RW</span><i></i><b></b></div>
+      <div class="loader-wordmark">RELEASE<span>WATCHER</span></div>
+      <div class="loader-caption">SYNCING THE SIGNAL NETWORK</div>
+      <div class="loader-progress"><i></i></div>
+      <div class="loader-status"><span>INITIALIZING SNAPSHOT</span><span>V5.0</span></div>
+    </div>
+  </div>
   <div class="ambient ambient--one" aria-hidden="true"></div>
   <div class="ambient ambient--two" aria-hidden="true"></div>
   <div class="grid-texture" aria-hidden="true"></div>
@@ -70,7 +80,7 @@
             <h3>🚀 New GitHub Release</h3>
             <div class="message-rule"></div>
             <div class="message-field"><span class="field-icon">📦</span><span><small>REPOSITORY</small><code>WhiteDNS/WhiteDNS-Android</code></span></div>
-            <div class="message-field"><span class="field-icon">🏷️</span><span><small>VERSION</small><code class="version-chip">v2.8.1</code></span></div>
+            <div class="message-field"><span class="field-icon">↩</span><span><small>PREVIOUS VERSION</small><code>v2.8.0</code></span></div><div class="message-field"><span class="field-icon">🏷️</span><span><small>NEW VERSION</small><code class="version-chip">v2.8.1</code></span></div>
             <div class="message-field"><span class="field-icon">📅</span><span><small>PUBLISHED</small><code>17 Oct 2026 · 10:30 UTC</code></span></div>
             <div class="quote-preview"><div class="quote-mark">“</div><div><b>Release notes</b><p>A clean summary of the release, preserved in a Telegram quote block.</p></div></div>
             <div class="message-downloads"><span>📎 3 DOWNLOAD ASSETS</span><i></i><i></i><i></i></div>
@@ -78,14 +88,14 @@
           </div>
           <div class="telegram-footer"><span>HTML formatting</span><span>Encrypted token storage <b>◆</b></span></div>
         </div>
-        <div class="float-tag float-tag--bottom"><span class="terminal-mini">&gt;_</span><span><b>Zero dashboard babysitting</b><small>scheduled checks · KV memory</small></span></div>
+        <div class="float-tag float-tag--bottom"><span class="terminal-mini">&gt;_</span><span><b>Zero dashboard babysitting</b><small>daily scans · KV history</small></span></div>
         <div class="visual-cross cross-one">✳</div><div class="visual-cross cross-two">+</div>
       </div>
     </section>
 
     <section class="metrics section-shell" aria-label="Live service metrics">
       <div class="metric-card"><span class="metric-icon icon-cyan">⌘</span><div><b id="metricRepos">08</b><span>Tracked repositories</span></div><i class="metric-spark"></i></div>
-      <div class="metric-card"><span class="metric-icon icon-violet">↻</span><div><b>15<span class="metric-unit"> min</span></b><span>Scheduled checks</span></div><i class="metric-spark spark-violet"></i></div>
+      <div class="metric-card"><span class="metric-icon icon-violet">↻</span><div><b id="metricChecked">—</b><span>Repositories checked</span></div><i class="metric-spark spark-violet"></i></div>
       <div class="metric-card"><span class="metric-icon icon-green">◈</span><div><b id="metricReleases">—</b><span>Known release tags</span></div><i class="metric-spark spark-green"></i></div>
       <div class="metric-card"><span class="metric-icon icon-orange">♙</span><div><b id="metricUsers">—</b><span>Subscribed chats</span></div><i class="metric-spark spark-orange"></i></div>
     </section>
@@ -93,7 +103,10 @@
     <section class="watchlist-section section-shell section-space" id="watchlist" aria-labelledby="watchlistTitle">
       <div class="section-heading watchlist-heading">
         <div><div class="section-kicker"><span>01</span> THE WATCHLIST</div><h2 id="watchlistTitle">Your releases, <span class="gradient-text">in orbit.</span></h2><p>One place to scan every monitored project, open its releases, and check the latest stored version.</p></div>
-        <div class="sync-status" id="syncStatus" data-state="loading"><span class="sync-dot"></span><span><b id="syncLabel">Connecting to Worker</b><small id="syncTime">Loading last known snapshot…</small></span><button type="button" id="refreshButton" class="icon-button" aria-label="Refresh watchlist snapshot" title="Refresh snapshot">↻</button></div>
+        <div class="watchlist-controls">
+          <div class="sync-status" id="syncStatus" data-state="loading"><span class="sync-dot"></span><span><b id="syncLabel">Connecting to Worker</b><small id="syncTime">Loading saved repository data…</small></span><button type="button" id="refreshButton" class="icon-button" aria-label="Refresh saved snapshot" title="Refresh snapshot">↻</button></div>
+          <button type="button" id="runScanButton" class="button button-primary scan-button"><span>↻</span> Run repository scan</button>
+        </div>
       </div>
 
       <div class="watchlist-toolbar glass-panel">
@@ -106,20 +119,20 @@
         <label class="sort-select"><span>Sort</span><select id="sortSelect" aria-label="Sort repositories"><option value="default">Default order</option><option value="name">Name A–Z</option><option value="owner">Owner A–Z</option><option value="tag">Version known first</option></select></label>
       </div>
 
-      <div class="watchlist-meta"><span><i class="meta-live-dot"></i> <b id="resultCount">8 repositories</b> configured for monitoring</span><span class="mono-meta">AUTO-CHECK <b>0 * * * *</b></span></div>
+      <div class="watchlist-meta"><span><i class="meta-live-dot"></i> <b id="resultCount">8 repositories</b> configured for monitoring</span><span class="mono-meta" id="scanMeta">DAILY SCAN · GITHUB ACTIONS · READ-ONLY SNAPSHOT</span></div>
       <div class="repo-grid" id="repoGrid" aria-live="polite" aria-busy="true">
         <article class="repo-skeleton"></article><article class="repo-skeleton"></article><article class="repo-skeleton"></article><article class="repo-skeleton"></article>
       </div>
       <div class="empty-state" id="emptyState" hidden><span>⌕</span><h3>No matching repositories</h3><p>Try another search term or clear the active filter.</p><button type="button" class="button button-secondary" id="clearFilters">Clear filters</button></div>
-      <div class="watchlist-footnote"><span class="footnote-icon">ⓘ</span><p>Version labels are the latest release values stored by the Worker during a scheduled check. Open GitHub for the upstream release page. Projects without a published stable GitHub Release can still be monitored.</p></div>
+      <div class="watchlist-footnote"><span class="footnote-icon">ⓘ</span><p>All cards use the persisted Cloudflare KV snapshot. Refresh only reloads saved data; the dedicated scan control or admin-only <code>/check</code> command is required to contact GitHub. Version history includes the previous stable release when GitHub exposes one.</p></div>
     </section>
 
     <section class="features-section section-shell section-space" id="features" aria-labelledby="featuresTitle">
-      <div class="section-heading"><div><div class="section-kicker"><span>02</span> BUILT FOR SIGNAL</div><h2 id="featuresTitle">Less polling. <span class="gradient-text">More clarity.</span></h2><p>Rich release details delivered in a compact, readable format — backed by persistent state, reliable fallbacks, and a public status dashboard.</p></div><div class="heading-stamp"><span>RW</span><small>WORKER<br>EDITION 4.1</small></div></div>
+      <div class="section-heading"><div><div class="section-kicker"><span>02</span> BUILT FOR SIGNAL</div><h2 id="featuresTitle">Less polling. <span class="gradient-text">More clarity.</span></h2><p>Rich release details delivered in a compact, readable format — backed by persistent state, reliable fallbacks, and a public status dashboard.</p></div><div class="heading-stamp"><span>RW</span><small>WORKER<br>EDITION 5.0</small></div></div>
       <div class="feature-grid">
         <article class="feature-card feature-card--large tilt-card"><div class="feature-topline"><span class="feature-symbol symbol-cyan">⌘</span><span class="feature-index">CAPABILITY / 01</span></div><h3>Formatting with purpose.</h3><p>Notifications use Telegram-supported HTML entities — not unsupported visual tricks — for clear hierarchy and better copyability.</p><div class="format-demo"><div class="format-row"><span class="format-token">B</span><b>Important release headline</b><small>bold</small></div><div class="format-row"><span class="format-token token-mono">&lt;&gt;</span><code>owner/project · v4.2.0</code><small>monospace</small></div><div class="format-row"><span class="format-token token-quote">❝</span><blockquote>A short release note stays visually separated from the metadata.</blockquote><small>quote</small></div><div class="format-row"><span class="format-token token-link">↗</span><a href="https://core.telegram.org/bots/api#formatting-options" target="_blank" rel="noreferrer">Direct release and download links</a><small>links</small></div></div></article>
         <article class="feature-card tilt-card"><div class="feature-topline"><span class="feature-symbol symbol-violet">◉</span><span class="feature-index">CAPABILITY / 02</span></div><h3>State that survives.</h3><p>Cloudflare KV remembers release tags and subscribers across Worker executions. First deployment can establish a quiet baseline instead of blasting old releases.</p><div class="state-diagram"><div class="state-node"><span>GH</span><b>GitHub API</b><small>latest release</small></div><span class="diagram-line"></span><div class="state-node node-violet"><span>KV</span><b>Persistent state</b><small>tag + check status</small></div></div><div class="feature-footer"><span class="status-mini"><i></i> Durable by design</span><span>02 stores</span></div></article>
-        <article class="feature-card tilt-card"><div class="feature-topline"><span class="feature-symbol symbol-green">↻</span><span class="feature-index">CAPABILITY / 03</span></div><h3>Automatic by default.</h3><p>A scheduled Worker checks the configured repositories every hour. The dashboard reads the last stored snapshot without hammering GitHub on every page visit.</p><div class="schedule-visual"><div class="schedule-ring"><span>1<small>HR</small></span></div><div class="schedule-copy"><b>Always watching</b><small>Scheduled trigger</small><div class="schedule-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div></div><div class="feature-footer"><span class="status-mini"><i></i> Serverless monitoring</span><span>Cloudflare</span></div></article>
+        <article class="feature-card tilt-card"><div class="feature-topline"><span class="feature-symbol symbol-green">↻</span><span class="feature-index">CAPABILITY / 03</span></div><h3>Automatic by default.</h3><p>GitHub Actions runs a daily scan, with a secure manual trigger from the dashboard or admin bot command. Every other dashboard and bot command reads persisted data only.</p><div class="schedule-visual"><div class="schedule-ring"><span>1<small>DAY</small></span></div><div class="schedule-copy"><b>Always watching</b><small>Daily GitHub Action</small><div class="schedule-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div></div><div class="feature-footer"><span class="status-mini"><i></i> Serverless monitoring</span><span>Cloudflare</span></div></article>
         <article class="feature-card feature-card--wide tilt-card"><div class="feature-topline"><span class="feature-symbol symbol-orange">↗</span><span class="feature-index">CAPABILITY / 04</span></div><div class="wide-feature-body"><div><h3>From alert to artifact.</h3><p>Each message can include release notes, version tags, publish time, asset sizes, and tap-ready buttons to open the release or download an asset — with a plain-text fallback if Telegram rejects markup.</p><div class="wide-pills"><span>Inline code</span><span>Block quotes</span><span>Release assets</span><span>Fallback delivery</span></div></div><div class="artifact-stack" aria-hidden="true"><div class="artifact-card artifact-back"><span>ZIP</span><b>source archive</b><small>28.4 MB</small></div><div class="artifact-card artifact-front"><span>APK</span><b>app-release.apk</b><small>42.8 MB <i>↓</i></small></div><div class="artifact-glow"></div></div></div></article>
       </div>
     </section>
@@ -128,13 +141,14 @@
       <div class="section-heading"><div><div class="section-kicker"><span>03</span> TELEGRAM COMMAND DECK</div><h2 id="commandsTitle">One command <span class="gradient-text">away.</span></h2><p>Start a private chat with your bot and use these commands to query the watchlist on demand.</p></div></div>
       <div class="command-layout">
         <div class="command-list glass-panel">
-          <div class="command-list-header"><span class="terminal-dot red"></span><span class="terminal-dot yellow"></span><span class="terminal-dot green"></span><b>COMMANDS.TXT</b><span class="command-count">06 commands</span></div>
+          <div class="command-list-header"><span class="terminal-dot red"></span><span class="terminal-dot yellow"></span><span class="terminal-dot green"></span><b>COMMANDS.TXT</b><span class="command-count">08 commands</span></div>
           <div class="command-item"><code>/start</code><span><b>Subscribe</b><small>Register for release alerts and see the watchlist.</small></span><button class="copy-command" data-copy="/start" aria-label="Copy /start">⧉</button></div>
           <div class="command-item"><code>/help</code><span><b>Help menu</b><small>View a guide to all available commands.</small></span><button class="copy-command" data-copy="/help" aria-label="Copy /help">⧉</button></div>
           <div class="command-item"><code>/repos</code><span><b>Watchlist</b><small>Show tracked repositories and known versions.</small></span><button class="copy-command" data-copy="/repos" aria-label="Copy /repos">⧉</button></div>
-          <div class="command-item"><code>/latest</code><span><b>Release overview</b><small>Fetch a live snapshot across all configured repositories.</small></span><button class="copy-command" data-copy="/latest" aria-label="Copy /latest">⧉</button></div>
-          <div class="command-item"><code>/latest owner/repo</code><span><b>Single repository</b><small>Get full release notes, assets, and direct buttons.</small></span><button class="copy-command" data-copy="/latest owner/repo" aria-label="Copy single repository command">⧉</button></div>
+          <div class="command-item"><code>/latest</code><span><b>Release overview</b><small>Read the cached release snapshot without contacting GitHub.</small></span><button class="copy-command" data-copy="/latest" aria-label="Copy /latest">⧉</button></div>
+          <div class="command-item"><code>/latest owner/repo</code><span><b>Single repository</b><small>Get cached release notes, previous/current versions, and assets.</small></span><button class="copy-command" data-copy="/latest owner/repo" aria-label="Copy single repository command">⧉</button></div>
           <div class="command-item"><code>/status</code><span><b>System status</b><small>Check subscriber count, release snapshots, and errors.</small></span><button class="copy-command" data-copy="/status" aria-label="Copy /status">⧉</button></div>
+          <div class="command-item"><code>/check</code><span><b>Admin scan</b><small>Run a fresh scan; restricted to configured admins.</small></span><button class="copy-command" data-copy="/check" aria-label="Copy /check">⧉</button></div>
           <div class="command-item"><code>/stop</code><span><b>Unsubscribe</b><small>Stop delivery; use /start to return later.</small></span><button class="copy-command" data-copy="/stop" aria-label="Copy /stop">⧉</button></div>
         </div>
         <aside class="setup-card"><div class="setup-orbit" aria-hidden="true"></div><div class="setup-icon">✦</div><div class="section-kicker">QUICK START</div><h3>Make it yours.</h3><p>Deploy the Worker, connect your bot token, and keep your KV namespace IDs. This repository includes the Worker source, Wrangler configuration, and this GitHub Pages dashboard.</p><div class="setup-step"><span>01</span><div><b>Configure secrets</b><small>Bot token + setup secrets</small></div></div><div class="setup-step"><span>02</span><div><b>Deploy with Wrangler</b><small>Keep existing KV IDs</small></div></div><div class="setup-step"><span>03</span><div><b>Set the webhook</b><small>Register commands automatically</small></div></div><a class="button button-primary setup-link" href="https://github.com/mehrdadmb2/release-notifier-bot#deployment" target="_blank" rel="noreferrer">Read deployment guide <span>↗</span></a></aside>
@@ -148,7 +162,19 @@
     <section class="final-cta section-shell"><div class="cta-spark cta-spark-one"></div><div class="cta-spark cta-spark-two"></div><div class="cta-content"><div class="section-kicker"><span>KEEP AN EYE ON THE SIGNAL</span></div><h2>Never miss the <span class="gradient-text">next release.</span></h2><p>Open the repository, deploy the Worker, and start following your projects with less manual checking.</p><div class="hero-actions cta-actions"><a class="button button-primary" href="https://github.com/mehrdadmb2/release-notifier-bot" target="_blank" rel="noreferrer">Open GitHub repository <span>↗</span></a><a class="button button-secondary" href="#watchlist">Back to watchlist ↑</a></div></div><div class="cta-orb" aria-hidden="true"><div class="cta-orb-inner">✦</div><span class="cta-orbit-dot dot-a"></span><span class="cta-orbit-dot dot-b"></span><span class="cta-orbit-dot dot-c"></span></div></section>
   </main>
 
-  <footer class="site-footer section-shell"><a class="footer-brand" href="#top"><span class="brand-mark small-mark">✦</span><span><b>ReleaseWatcher</b><small>EVERY RELEASE. ONE SIGNAL.</small></span></a><p>Built on GitHub Releases, Cloudflare Workers, and Telegram Bot API.</p><div class="footer-links"><a href="https://github.com/mehrdadmb2/release-notifier-bot" target="_blank" rel="noreferrer">GitHub ↗</a><a href="https://core.telegram.org/bots/api" target="_blank" rel="noreferrer">Telegram API ↗</a><a href="https://developers.cloudflare.com/workers/" target="_blank" rel="noreferrer">Cloudflare Workers ↗</a></div><div class="footer-bottom"><span>© <span id="currentYear">2026</span> Release Watcher</span><span class="footer-live"><i></i><span id="footerStatus">Dashboard ready</span></span><span class="footer-version">BUILD <b>4.1.0</b></span></div></footer>
+  <footer class="site-footer section-shell"><a class="footer-brand" href="#top"><span class="brand-mark small-mark">✦</span><span><b>ReleaseWatcher</b><small>EVERY RELEASE. ONE SIGNAL.</small></span></a><p>Built on GitHub Releases, Cloudflare Workers, and Telegram Bot API.</p><div class="footer-links"><a href="https://github.com/mehrdadmb2/release-notifier-bot" target="_blank" rel="noreferrer">GitHub ↗</a><a href="https://core.telegram.org/bots/api" target="_blank" rel="noreferrer">Telegram API ↗</a><a href="https://developers.cloudflare.com/workers/" target="_blank" rel="noreferrer">Cloudflare Workers ↗</a></div><div class="footer-bottom"><span>© <span id="currentYear">2026</span> Release Watcher</span><span class="footer-live"><i></i><span id="footerStatus">Dashboard ready</span></span><span class="footer-version">BUILD <b>5.0.0</b></span></div></footer>
+  <dialog class="scan-dialog" id="scanDialog" aria-labelledby="scanDialogTitle">
+    <form class="scan-dialog-card" id="scanForm">
+      <div class="scan-dialog-mark">↻</div>
+      <div class="section-kicker">ADMIN ACTION · AUTHENTICATED</div>
+      <h2 id="scanDialogTitle">Run a fresh scan</h2>
+      <p>This is the only dashboard action that contacts GitHub. Your key is sent for this request only and is not stored in the page.</p>
+      <label for="scanSecret">Worker CHECK_SECRET</label>
+      <input id="scanSecret" type="password" autocomplete="current-password" placeholder="Enter the scan secret" required>
+      <div class="scan-dialog-actions"><button type="button" id="cancelScan" class="button button-secondary">Cancel</button><button type="submit" id="confirmScan" class="button button-primary">Start scan <span>↗</span></button></div>
+      <small id="scanDialogHint">The scan may take a few seconds for multiple repositories.</small>
+    </form>
+  </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 </body>
 </html>

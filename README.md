@@ -1,237 +1,169 @@
-# 🛰️ GitHub Release Watcher
+# 🛰️ Release Watcher v5.0
 
-**Every release. One signal.** A serverless Telegram bot that watches GitHub repositories for new stable Releases, sends well-formatted alerts, and powers a responsive GitHub Pages dashboard.
+**Every release. One signal.** A GitHub Release monitor built with Cloudflare Workers, Cloudflare KV, Telegram Bot API, GitHub Actions, and a static GitHub Pages dashboard.
 
-[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-f38020?logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/workers/)
-[![Telegram Bot API](https://img.shields.io/badge/Telegram-Bot%20API-26a5e4?logo=telegram&logoColor=white)](https://core.telegram.org/bots/api)
-[![GitHub Pages](https://img.shields.io/badge/GitHub-Pages-222?logo=github)](https://pages.github.com/)
-[![JavaScript](https://img.shields.io/badge/JavaScript-ES%20Modules-f7df1e?logo=javascript&logoColor=111)](https://developer.mozilla.org/en-US/docs/Web/JavaScript)
+- **Worker:** <https://release-watcher-bot.game-developer-mb.workers.dev/>
+- **Repository:** <https://github.com/mehrdadmb2/release-notifier-bot>
+- **Dashboard:** <https://mehrdadmb2.github.io/release-notifier-bot/>
 
-- **Worker endpoint:** <https://release-watcher-bot.game-developer-mb.workers.dev/>
-- **GitHub repository:** <https://github.com/mehrdadmb2/release-notifier-bot>
-- **Pages dashboard (after enabling Pages):** <https://mehrdadmb2.github.io/release-notifier-bot/>
+## What changed in v5.0
 
-> The dashboard can display a local/static watchlist if the Worker API is temporarily unavailable. Live state and subscriber metrics require the Worker to be deployed with valid KV bindings.
+### Persistent repository database
 
-## ✨ Highlights
+The existing `RELEASES` KV namespace is retained and extended as the persistent data store. No D1 migration is required, and the existing `USERS` namespace remains untouched. The Worker stores:
 
-### Telegram notifications
+- Current stable release, release notes, release URL, author, publication time, release ID, and downloadable assets.
+- Previous stable version and a version-history timeline (up to 100 records per repository).
+- Daily repository-stat snapshots (up to 180 days, one snapshot per repository per day).
+- Repository metadata: description, homepage, stars, forks, watchers, open issues, primary language, topics, license, default branch, visibility, archive state, creation/update/push timestamps, and repository size.
+- Per-repository health/check status, last-check time, metadata status, scan source, and a global last-scan summary.
+- Existing Telegram subscribers in the unchanged `USERS` KV namespace.
 
-- Detailed HTML-formatted release cards with bold headings, monospace repository names and versions, quoted paragraphs, Markdown headings/lists/links, inline code, fenced code blocks, full UTC timestamps, direct GitHub links, asset names and file sizes.
-- Inline Telegram buttons to open the release, open the repository, or download the first asset.
-- Long changelogs are delivered as multiple size-safe Telegram messages (without cutting HTML tags/entities in half), with action buttons attached to the final part; release descriptions are truncated only after a generous 6,500-character safety cap.
-- Escaped untrusted text and a plain-text fallback if Telegram rejects formatting.
-- A first-run baseline: existing release tags are stored silently by default instead of sending a burst of old notifications.
-- Existing KV values that contain only a release tag are still understood; state is gradually written in the newer structured format.
+The initial scan attempts to backfill the immediately previous stable release from GitHub's releases list. The first saved current release is a quiet baseline; it does not notify subscribers. Later tag changes create a version-history event and a Telegram notification with **previous version → new version**.
 
-### Commands
+### One scan trigger, cached reads everywhere else
 
-| Command | Purpose |
+The scan architecture is intentionally separated:
+
+| Action | Contacts GitHub API? | Purpose |
+| --- | --- | --- |
+| GitHub Actions daily schedule | **Yes** | Refresh repository metadata, release state, history, and daily snapshots |
+| GitHub Actions `workflow_dispatch` | **Yes** | Manually trigger the same secure scan pipeline from GitHub |
+| Dashboard **Run repository scan** | **Yes** | Manual scan after entering `CHECK_SECRET` |
+| Telegram `/check` | **Yes** | Admin-only manual scan, restricted by `ADMIN_CHAT_IDS` |
+| Dashboard page load / refresh | No | Read cached `/api/overview` snapshot |
+| Telegram `/repos`, `/latest`, `/status`, `/help` | No | Read stored state or static help text |
+
+There is no Cloudflare Cron trigger in v5.0. This prevents duplicate scheduled scans. The daily GitHub Action runs at `02:17 UTC`; GitHub may delay scheduled workflows during high-load periods.
+
+### Dashboard and Telegram
+
+- Full-screen animated startup sequence, responsive glass UI, search, filters, sorting, copy actions, and repository intelligence panels.
+- Previous → current version comparison, release-change history, daily snapshot counts, repository details, language, stars, forks, open issues, license, branch, topics, and activity dates.
+- The refresh icon reloads the saved snapshot only. It never starts a GitHub scan.
+- Dedicated scan control is protected by the Worker `CHECK_SECRET`. The key is used for that request only and is not persisted by the page.
+- Telegram notification shows both **New version** and **Previous version**, alongside changelog, publish time, assets, and direct links.
+- `/latest` is now cache-only; it no longer sends one GitHub API request per tracked repository.
+- The Worker health endpoint and deployment landing page describe the daily Action-based schedule.
+
+## Telegram commands
+
+| Command | Behavior |
 | --- | --- |
-| `/start` | Register the chat and show the monitored repositories |
-| `/help` | Show the bot command guide |
-| `/repos` | List watch targets and their last known state |
-| `/latest` | Fetch a live snapshot across configured repositories with title, timestamp, notes preview, and asset count |
-| `/latest owner/repo` | Fetch full details for a single repository; GitHub URLs are accepted too |
-| `/status` | Display subscriber count, stored release count, last check, and errors |
-| `/stop` | Unsubscribe the chat |
-| `/check` | Trigger a manual scan only for chat IDs listed in `ADMIN_CHAT_IDS` |
+| `/start` | Subscribe this chat and show the watchlist |
+| `/help` | Show the command guide |
+| `/repos` | List monitored repositories, stored versions, and last-check times |
+| `/latest` | Show all cached latest releases; no GitHub API calls |
+| `/latest owner/repo` | Show cached full release details, notes, assets, and previous version |
+| `/status` | Show subscriber, repository, scan, and error statistics |
+| `/check` | Admin-only scan; only chat IDs in `ADMIN_CHAT_IDS` are allowed |
+| `/stop` | Unsubscribe this chat |
 
-Telegram's command menu is automatically registered when `/setwebhook` succeeds.
+The Telegram command menu is updated when `/setwebhook` runs successfully.
 
-### Dashboard
-
-- Responsive layout with animated gradients, glass panels, deep shadows and interactive cards.
-- Live connection state to the Worker's read-only `/api/overview` API.
-- Search, filters, sorting, copy-to-clipboard actions, and release links.
-- Refreshable status snapshot; the dashboard does not fetch all GitHub repositories directly from every visitor's browser.
-- Designed to work on mobile and desktop, including a mobile navigation menu and reduced-motion support.
-
-## 👀 Repositories tracked by default
-
-The configured watchlist includes the original projects plus the five newly requested repositories:
-
-1. [`2dust/v2rayN`](https://github.com/2dust/v2rayN)
-2. [`2dust/v2rayNG`](https://github.com/2dust/v2rayNG)
-3. [`diegosouzapw/OmniRoute`](https://github.com/diegosouzapw/OmniRoute)
-4. [`WhiteDNS/WhiteDNS-Android`](https://github.com/WhiteDNS/WhiteDNS-Android)
-5. [`shirokhorshid/shirokhorshid-android`](https://github.com/shirokhorshid/shirokhorshid-android)
-6. [`KNG7-P/Se7en-Pro`](https://github.com/KNG7-P/Se7en-Pro)
-7. [`therealaleph/MasterHttpRelayVPN-RUST`](https://github.com/therealaleph/MasterHttpRelayVPN-RUST)
-8. [`anonvector/SlipNet`](https://github.com/anonvector/SlipNet)
-
-Add future projects to `REPOS` in `wrangler.toml` as a comma-separated list of `owner/repo` identifiers. Names must follow GitHub's owner/repository format.
-
-## 🧱 Architecture
+## Architecture
 
 ```text
-GitHub Releases API
-        │
-        ▼
-Cloudflare Worker ─────── Cron Trigger (every hour)
-   │            │
-   │            ├── RELEASES KV: release tags + check results
-   │            └── USERS KV: Telegram chat subscriptions
-   │
-   ├── Telegram webhook → commands / formatted release alerts
-   └── /api/overview ───────────────────────────┐
-                                                ▼
-                                       GitHub Pages dashboard
+                       once per day / workflow_dispatch
+                       ┌──────────────────────────────┐
+                       │ GitHub Actions                │
+                       │ POST /check + CHECK_SECRET    │
+                       └──────────────┬───────────────┘
+                                      │
+ Dashboard ── GET /api/overview ──────┤
+ Manual scan ── POST /check ──────────┤
+ Telegram webhook ── /check ──────────┤
+                                      ▼
+                           Cloudflare Worker
+                         ┌─────────────────────┐
+                         │ Auth + scan engine  │
+                         │ GitHub API compare  │
+                         │ Telegram notifier   │
+                         └───────┬───────┬─────┘
+                                 │       │
+                      ┌──────────▼─┐   ┌─▼────────────┐
+                      │ RELEASES KV│   │ USERS KV     │
+                      │ snapshots  │   │ subscribers  │
+                      │ history    │   └──────────────┘
+                      │ metadata   │
+                      └────────────┘
 ```
 
-The scheduled trigger calls the GitHub Releases `latest` endpoint for each watched repository. This endpoint exposes published stable releases; a repository without a stable published GitHub Release is shown as having no stable release rather than crashing the entire scan. GitHub source commits or Git tags do not automatically count as a Release.
+`RELEASES` uses key prefixes `release:`, `check:`, `repo:`, `history:`, `snapshots:`, and the global key `meta:last-scan`. The `USERS` key format is unchanged: each chat ID remains a key, so the existing subscriber list can be preserved.
 
-## 🚦 Important: preserve your existing KV namespaces
+## Repository watchlist
 
-The `wrangler.toml` shipped here intentionally contains two ID placeholders. **Do not deploy until you replace them.** Use the namespace IDs already attached to the production Worker so that existing subscribers and stored release tags remain accessible.
+Default `REPOS` values in `wrangler.toml`:
 
-1. Open Cloudflare Dashboard → **Workers & Pages** → `release-watcher-bot` → **Settings** → **Bindings**.
-2. Locate the KV namespace attached to `RELEASES` and copy its namespace ID; do the same for `USERS`.
-3. Replace the two placeholders in `wrangler.toml` with those exact IDs.
-4. Do not remove or rename the existing namespaces.
-
-You can also list namespaces with `npx wrangler kv namespace list`, then match them to the binding IDs in the Worker's settings. If the original namespaces truly do not exist, create them only after confirming that no production data needs to be preserved:
-
-```powershell
-npx wrangler kv namespace create RELEASES
-npx wrangler kv namespace create USERS
+```text
+2dust/v2rayN
+2dust/v2rayNG
+diegosouzapw/OmniRoute
+WhiteDNS/WhiteDNS-Android
+shirokhorshid/shirokhorshid-android
+KNG7-P/Se7en-Pro
+therealaleph/MasterHttpRelayVPN-RUST
+anonvector/SlipNet
 ```
 
-Copy the IDs printed by Wrangler into `wrangler.toml`.
+Append or remove `owner/repo` values in `REPOS`. The dashboard renders the Worker-provided list, so you do not need to edit `assets/app.js` to add a repository.
 
-## 🚀 Deploy the Worker with Wrangler (Windows PowerShell)
+## Deployment
 
-Run these commands manually in PowerShell; no `.ps1` script is required.
+See **[SETUP-FA.md](SETUP-FA.md)** for the exact Windows PowerShell + Wrangler steps, preservation of existing KV namespaces, secrets, GitHub Actions setup, webhook registration, Pages deployment, and verification commands.
 
-### 1. Download or replace the project files
+### Required configuration at a glance
 
-Clone the repository, or place these files into your existing local clone without replacing your KV IDs with the placeholders:
+| Setting | Type | Purpose |
+| --- | --- | --- |
+| `REPOS` | Wrangler variable | Comma-separated `owner/repo` watchlist |
+| `NOTIFY_ON_FIRST_SEEN` | Wrangler variable | Default `false`; initial baselines stay silent |
+| `PUBLIC_SITE_ORIGIN` | Wrangler variable | Browser CORS origin, without the Pages path |
+| `PUBLIC_SITE_URL` | Wrangler variable | Dashboard link shown on the Worker landing page |
+| `TELEGRAM_BOT_TOKEN` | Worker secret | BotFather token |
+| `TELEGRAM_WEBHOOK_SECRET` | Optional Worker secret | Verify Telegram webhook requests |
+| `SET_WEBHOOK_SECRET` | Worker secret | Protect `POST /setwebhook` |
+| `CHECK_SECRET` | Worker secret | Protect `POST /check` |
+| `ADMIN_CHAT_IDS` | Worker secret | Comma-separated Telegram IDs allowed to run `/check` |
+| `GITHUB_TOKEN` | Optional Worker secret | Authenticated GitHub API quota for larger watchlists |
+| `WORKER_CHECK_SECRET` | GitHub Actions secret | Must exactly match the Worker `CHECK_SECRET` |
+| `RELEASES` | KV binding | Release state, metadata, history, and daily snapshots |
+| `USERS` | KV binding | Telegram subscriptions |
 
-```powershell
-git clone https://github.com/mehrdadmb2/release-notifier-bot.git
-cd release-notifier-bot
-```
+## API endpoints
 
-Replace the project files with the upgraded versions. Before deployment, edit `wrangler.toml` and enter the existing production namespace IDs.
+| Route | Method | Authentication | Behavior |
+| --- | --- | --- | --- |
+| `/health` | GET | Public | Worker health and scan strategy |
+| `/api/health` | GET | Public | Alias of `/health` |
+| `/api/overview` | GET | Public, CORS-limited | Read-only stored dashboard snapshot |
+| `/check` | POST | `X-Check-Secret` | Run a fresh scan, persist data, and notify on version changes |
+| `/setwebhook` | POST | `X-Setup-Secret` | Configure Telegram webhook and bot command menu |
+| `/webhook` | POST | Telegram secret token when configured | Receive Telegram updates |
 
-### 2. Install Wrangler and log in
+The dashboard's GET API is strictly read-only. The only Worker route that starts repository scanning is `POST /check`.
+
+## Reliability and known boundaries
+
+- GitHub 403/429 responses and transient failures are retried with bounded backoff. A `GITHUB_TOKEN` Worker secret is optional but recommended if the watchlist grows significantly.
+- Repository metadata and release data are handled independently. A metadata failure does not discard a release update if the release endpoint still succeeds.
+- Missing or inaccessible repositories are marked `not-found`; repositories with no stable GitHub Release are marked `no-release`.
+- Each daily stats collection is deduplicated by UTC date. A manual scan on the same date updates that day's snapshot instead of inflating the timeline.
+- Version history is bounded to 100 entries per repository; daily stats are bounded to 180 days.
+- A failed scan for one repository does not stop the remaining repositories from being processed.
+- The dashboard can show a static fallback list while the Worker is unreachable, but actual release versions and repository metrics require a successful initial scan.
+- GitHub's scheduler is best-effort. `workflow_dispatch` and the dashboard/Telegram manual triggers are available when an immediate refresh is needed.
+
+## Local checks
 
 ```powershell
 npm install
-npx wrangler login
-```
-
-### 3. Add the bot token and setup secrets
-
-Create each secret interactively so its value is not placed in `wrangler.toml` or committed to Git. Use strong, unique random values for the setup/check/webhook secrets.
-
-```powershell
-npx wrangler secret put TELEGRAM_BOT_TOKEN
-npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
-npx wrangler secret put SET_WEBHOOK_SECRET
-npx wrangler secret put CHECK_SECRET
-```
-
-Optional: enable the `/check` Telegram command for one or more administrators. Enter comma-separated Telegram chat IDs (not usernames) when prompted:
-
-```powershell
-npx wrangler secret put ADMIN_CHAT_IDS
-```
-
-`TELEGRAM_WEBHOOK_SECRET` must consist of 1–256 characters from `A-Z`, `a-z`, `0-9`, `_`, or `-`. Store the same secret in the Worker secret; Wrangler will use it when registering the Telegram webhook.
-
-### 4. Check configuration and deploy
-
-```powershell
 npm run check
-npx wrangler deploy
+npm test
 ```
 
-The Worker is configured to check every hour (`0 * * * *`). To change the cadence, edit `triggers.crons` in `wrangler.toml` and update the matching interval text in `src/index.js` and the dashboard. Be mindful of GitHub API rate limits if you increase the frequency or watch many more repositories.
+Tests use mocked GitHub and Telegram responses. They do not publish Telegram messages or modify live Cloudflare KV.
 
-### 5. Configure the Telegram webhook and bot command menu
+## License
 
-Run the following PowerShell command. It prompts for the `SET_WEBHOOK_SECRET` value; do not paste that value into a public message or commit it:
-
-```powershell
-$setupSecret = Read-Host "Enter the SET_WEBHOOK_SECRET value"
-Invoke-RestMethod -Method Post `
-  -Uri "https://release-watcher-bot.game-developer-mb.workers.dev/setwebhook" `
-  -Headers @{ "X-Setup-Secret" = $setupSecret }
-```
-
-A successful response contains `ok: true`, a Telegram `setWebhook` result and the `webhookUrl`. The command menu is registered at the same time. If the Worker uses a different hostname, substitute that hostname.
-
-### 6. Trigger a manual check
-
-```powershell
-$checkSecret = Read-Host "Enter the CHECK_SECRET value"
-Invoke-RestMethod -Method Post `
-  -Uri "https://release-watcher-bot.game-developer-mb.workers.dev/check" `
-  -Headers @{ "X-Check-Secret" = $checkSecret }
-```
-
-A scheduled cron run does not require a request from you. If you need to inspect logs in real time:
-
-```powershell
-npx wrangler tail
-```
-
-## 🌐 Enable GitHub Pages
-
-The dashboard is a static site in `index.html` with styles/scripts in `assets/`; it does not require a build command.
-
-1. Push the updated files to the repository's `main` branch.
-2. Open the repository's **Settings → Pages**.
-3. Under **Build and deployment**, choose **Deploy from a branch**.
-4. Select branch `main` and folder `/(root)`, then save.
-5. Wait for the Pages deployment shown in the Pages section to complete.
-6. Open `https://mehrdadmb2.github.io/release-notifier-bot/` and test the search, filters, copy buttons and Worker connection indicator.
-
-The dashboard's API endpoint is set in `assets/app.js` to the Worker URL specified above. The Worker's `PUBLIC_SITE_ORIGIN` must match the page origin (`https://mehrdadmb2.github.io`), not the full path.
-
-## 🔧 Configuration reference
-
-| Setting | Type | Description |
-| --- | --- | --- |
-| `REPOS` | Variable | Comma-separated list of `owner/repo` names |
-| `NOTIFY_ON_FIRST_SEEN` | Variable | `false` establishes baseline silently; set `true` to alert on all repositories the first time they are recorded |
-| `PUBLIC_SITE_ORIGIN` | Variable | Origin allowed to read `/api/overview` from the browser |
-| `PUBLIC_SITE_URL` | Variable | Dashboard link on the Worker's landing page |
-| `TELEGRAM_BOT_TOKEN` | Secret | Telegram token from BotFather |
-| `TELEGRAM_WEBHOOK_SECRET` | Secret | Authenticates incoming Telegram webhook requests |
-| `SET_WEBHOOK_SECRET` | Secret | Authenticates the `POST /setwebhook` setup endpoint via `X-Setup-Secret` |
-| `CHECK_SECRET` | Secret | Authenticates the `POST /check` endpoint via `X-Check-Secret` |
-| `ADMIN_CHAT_IDS` | Optional secret | Comma-separated IDs allowed to run Telegram `/check` |
-| `RELEASES` | KV binding | Persistent release tags, per-repository check states |
-| `USERS` | KV binding | Telegram chat subscriptions |
-
-No API token is needed for public GitHub Release endpoints. For a large watchlist or stricter API quotas, you can extend the Worker with a GitHub token stored as a secret; never hard-code tokens in source code.
-
-## 🧪 Verification checklist
-
-- [ ] `wrangler.toml` has the existing `RELEASES` and `USERS` KV namespace IDs.
-- [ ] `npm run check` passes.
-- [ ] The Worker deploys without binding errors.
-- [ ] `/health` returns JSON with `ok: true`.
-- [ ] The authenticated `/setwebhook` request returns `ok: true`.
-- [ ] In Telegram, `/start`, `/help`, `/repos`, `/latest`, and `/status` respond.
-- [ ] `POST /check` with `X-Check-Secret` returns a scan summary.
-- [ ] The Pages dashboard displays **Worker connected** and shows the stored release states.
-- [ ] A test release notification renders its version in monospace, notes in a quote block and links as working Telegram buttons.
-
-## 🛟 Troubleshooting
-
-**`Missing KV bindings` or deployment binding errors** — Check the `RELEASES` and `USERS` IDs and make sure the bindings exist in the target Cloudflare account.
-
-**Telegram doesn't respond** — Confirm `TELEGRAM_BOT_TOKEN`, deploy first, then run the authenticated `/setwebhook` request. If you configured `TELEGRAM_WEBHOOK_SECRET`, it must match the value used by the webhook setup request.
-
-**Dashboard says Worker API unavailable** — Open the Worker's `/health` route. Then inspect the browser console and run `npx wrangler tail`. Confirm that `PUBLIC_SITE_ORIGIN` is exactly `https://mehrdadmb2.github.io`.
-
-**A repository has no version shown** — The Worker may not have completed its first scheduled scan yet, or the repository may not publish a stable GitHub Release. Visit its Releases page to verify.
-
-**First deployment sends no notifications** — This is intentional by default. The Worker saves the current tags as a baseline and avoids notifying on older releases. Set `NOTIFY_ON_FIRST_SEEN = "true"` only if you want initial releases broadcast to all subscribed chats.
-
-## 📄 License
-
-Apache License 2.0. See [`LICENSE`](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).

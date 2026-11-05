@@ -1,6 +1,6 @@
 {
   "name": "release-notifier-bot",
-  "version": "4.1.0",
+  "version": "5.0.0",
   "private": true,
   "description": "A Cloudflare Worker and Telegram bot that monitors GitHub releases, with a responsive GitHub Pages dashboard.",
   "main": "src/index.js",
@@ -19,6 +19,8 @@
     "release-notifier",
     "github-pages",
     "kv-storage",
+    "release-history",
+    "github-actions",
     "automation"
   ],
   "author": "mehrdadmb2",

@@ -4,15 +4,14 @@ compatibility_date = "2025-09-01"
 workers_dev = true
 
 [vars]
-# Keep the existing repositories and append new owner/repo values separated by commas.
+# Comma-separated GitHub repositories in owner/repo format.
 REPOS = "2dust/v2rayN,2dust/v2rayNG,diegosouzapw/OmniRoute,WhiteDNS/WhiteDNS-Android,shirokhorshid/shirokhorshid-android,KNG7-P/Se7en-Pro,therealaleph/MasterHttpRelayVPN-RUST,anonvector/SlipNet"
 NOTIFY_ON_FIRST_SEEN = "false"
 PUBLIC_SITE_ORIGIN = "https://mehrdadmb2.github.io"
 PUBLIC_SITE_URL = "https://mehrdadmb2.github.io/release-notifier-bot/"
 
-# CRITICAL: Replace these two placeholders with the IDs of the EXISTING namespaces
-# attached to your currently deployed Worker. Do not create new namespaces when
-# you need to preserve the existing subscriber list and release history.
+# IMPORTANT: Keep the IDs of the EXISTING namespaces attached to your current Worker.
+# Do not create replacement namespaces when preserving current subscribers/state matters.
 [[kv_namespaces]]
 binding = "RELEASES"
 id = "REPLACE_WITH_EXISTING_RELEASES_KV_NAMESPACE_ID"
@@ -21,9 +20,14 @@ id = "REPLACE_WITH_EXISTING_RELEASES_KV_NAMESPACE_ID"
 binding = "USERS"
 id = "REPLACE_WITH_EXISTING_USERS_KV_NAMESPACE_ID"
 
-[triggers]
-# Every 60 minutes. Keep this aligned with the bot's help/status text.
-crons = ["0 * * * *"]
+# Scanning is intentionally NOT scheduled by Cloudflare Cron.
+# .github/workflows/daily-repository-scan.yml is the only scheduled scan trigger.
+# Manual scans use authenticated POST /check or Telegram /check for configured admins.
 
 [observability]
 enabled = true
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true

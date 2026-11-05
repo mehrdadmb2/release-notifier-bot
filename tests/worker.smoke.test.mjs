@@ -63,38 +63,64 @@ test('Worker stores a quiet baseline and notifies on a later release change', as
   currentTag = 'v1.0.0';
   env.RELEASES = new MemoryKV();
 
+  let githubCalls = 0;
+  const makeRelease = (tag, id = 100) => ({
+    id,
+    tag_name: tag,
+    name: `Release ${tag}`,
+    html_url: `https://github.com/owner/project/releases/tag/${tag}`,
+    published_at: '2026-10-17T10:30:00Z',
+    created_at: '2026-10-17T10:30:00Z',
+    updated_at: '2026-10-17T10:30:00Z',
+    target_commitish: 'main',
+    author: { login: 'release-maintainer' },
+    draft: false,
+    prerelease: false,
+    body: [
+      'Improved handling of <unsafe> input & output.',
+      '',
+      '### What is new',
+      '- Faster startup and cleaner handling',
+      '- Supports [pull request 123](https://github.com/owner/project/pull/123)',
+      '',
+      '1. Update subscriptions',
+      '2. Test the connection',
+      '',
+      'Use `v2rayn://` to import a profile.',
+      '',
+      '> Compatibility note for existing users',
+      '',
+      '```json',
+      '{',
+      '  "Authorization": "Bearer test"',
+      '}',
+      '```',
+    ].join('\n'),
+    assets: [{ name: 'release.zip', size: 2048, browser_download_url: 'https://github.com/owner/project/releases/download/test/release.zip' }],
+  });
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url.startsWith('https://api.github.com/repos/')) {
+      githubCalls += 1;
+      if (url.endsWith('/releases?per_page=20')) return jsonResponse([makeRelease(currentTag, 100), makeRelease('v0.9.0', 90)]);
+      if (url.endsWith('/releases/latest')) return jsonResponse(makeRelease(currentTag, currentTag === 'v1.0.0' ? 100 : 200));
       return jsonResponse({
-        id: currentTag === 'v1.0.0' ? 100 : 200,
-        tag_name: currentTag,
-        name: `Release ${currentTag}`,
-        html_url: `https://github.com/owner/project/releases/tag/${currentTag}`,
-        published_at: '2026-10-17T10:30:00Z',
-        draft: false,
-        prerelease: false,
-        body: [
-          'Improved handling of <unsafe> input & output.',
-          '',
-          '### What is new',
-          '- Faster startup and cleaner handling',
-          '- Supports [pull request 123](https://github.com/owner/project/pull/123)',
-          '',
-          '1. Update subscriptions',
-          '2. Test the connection',
-          '',
-          'Use `v2rayn://` to import a profile.',
-          '',
-          '> Compatibility note for existing users',
-          '',
-          '```json',
-          '{',
-          '  "Authorization": "Bearer test"',
-          '}',
-          '```',
-        ].join('\n'),
-        assets: [{ name: 'release.zip', size: 2048, browser_download_url: 'https://github.com/owner/project/releases/download/test/release.zip' }],
+        full_name: 'owner/project',
+        description: 'Example repository metadata',
+        html_url: 'https://github.com/owner/project',
+        visibility: 'public',
+        stargazers_count: 1234,
+        forks_count: 120,
+        subscribers_count: 31,
+        open_issues_count: 7,
+        size: 2048,
+        default_branch: 'main',
+        language: 'JavaScript',
+        license: { spdx_id: 'MIT' },
+        topics: ['release-monitoring', 'automation'],
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2026-10-17T10:30:00Z',
+        pushed_at: '2026-10-17T10:30:00Z',
       });
     }
     if (url.startsWith('https://api.telegram.org/')) {
@@ -112,6 +138,7 @@ test('Worker stores a quiet baseline and notifies on a later release change', as
   const firstResult = await first.json();
   assert.equal(firstResult.ok, true);
   assert.equal(firstResult.changed, 0, 'first check should create a quiet baseline');
+  assert.equal(firstResult.initialized, 1);
   assert.equal(telegramMessages.length, 0, 'baseline should not broadcast an old release');
 
   currentTag = 'v1.1.0';
@@ -133,14 +160,119 @@ test('Worker stores a quiet baseline and notifies on a later release change', as
   assert.match(telegramMessages[0].payload.text, /<pre><code>/);
   assert.ok(telegramMessages[0].payload.reply_markup.inline_keyboard.length >= 1);
 
+  const callsBeforeOverview = githubCalls;
   const overviewResponse = await worker.fetch(new Request('https://worker.test/api/overview', {
     headers: { Origin: env.PUBLIC_SITE_ORIGIN },
   }), env, ctx);
+  assert.equal(githubCalls, callsBeforeOverview, '/api/overview must only read stored KV data');
   const overview = await overviewResponse.json();
   assert.equal(overview.ok, true);
   assert.equal(overview.repositories[0].latestTag, 'v1.1.0');
+  assert.equal(overview.repositories[0].previousTag, 'v1.0.0');
+  assert.equal(overview.repositories[0].description, 'Example repository metadata');
+  assert.equal(overview.repositories[0].stars, 1234);
+  assert.equal(overview.repositories[0].language, 'JavaScript');
+  assert.equal(overview.repositories[0].history[0].previousTag, 'v1.0.0');
+  assert.equal(overview.repositories[0].snapshots.length, 1);
   assert.equal(overview.repositoryCount, 1);
   assert.equal(overviewResponse.headers.get('Access-Control-Allow-Origin'), env.PUBLIC_SITE_ORIGIN);
+
+  const githubCallsBeforeCachedRead = githubCalls;
+  for (const command of ['/latest owner/project', '/repos', '/status']) {
+    const pending = [];
+    await worker.fetch(new Request('https://worker.test/webhook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: { chat: { id: 123456, type: 'private' }, from: { is_bot: false }, text: command } }),
+    }), env, { waitUntil(promise) { pending.push(promise); } });
+    await Promise.all(pending);
+  }
+  assert.equal(githubCalls, githubCallsBeforeCachedRead, '/latest, /repos, and /status must read KV and must not call GitHub');
+  const latestMessage = telegramMessages.findLast(({ payload }) => payload.text.includes('LATEST STORED RELEASE'));
+  assert.ok(latestMessage);
+  assert.match(latestMessage.payload.text, /Previous version/);
+  assert.match(latestMessage.payload.text, /v1\.0\.0/);
+  assert.match(latestMessage.payload.text, /v1\.1\.0/);
+});
+
+test('migrates a legacy stored tag into version history and backfills the previous release', async (t) => {
+  t.after(() => { globalThis.fetch = originalFetch; });
+  telegramMessages.length = 0;
+  const migratedEnv = {
+    ...env,
+    REPOS: 'owner/legacy-project',
+    RELEASES: new MemoryKV({ 'release:owner/legacy-project': 'v1.4.0' }),
+    USERS: new MemoryKV(),
+  };
+  let previousReleaseCalls = 0;
+  const makeRelease = (tag, id) => ({
+    id,
+    tag_name: tag,
+    name: `Release ${tag}`,
+    html_url: `https://github.com/owner/legacy-project/releases/tag/${tag}`,
+    published_at: '2026-10-25T09:00:00Z',
+    created_at: '2026-10-25T09:00:00Z',
+    draft: false,
+    prerelease: false,
+    body: `Notes for ${tag}`,
+    assets: [],
+  });
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.github.com/repos/')) {
+      if (url.endsWith('/releases?per_page=20')) {
+        previousReleaseCalls += 1;
+        return jsonResponse([makeRelease('v1.4.0', 140), makeRelease('v1.3.0', 130)]);
+      }
+      if (url.endsWith('/releases/latest')) return jsonResponse(makeRelease('v1.4.0', 140));
+      return jsonResponse({
+        full_name: 'owner/legacy-project',
+        description: 'Legacy project migrated without data loss',
+        html_url: 'https://github.com/owner/legacy-project',
+        visibility: 'public',
+        stargazers_count: 42,
+        forks_count: 4,
+        watchers_count: 3,
+        open_issues_count: 1,
+        size: 512,
+        default_branch: 'main',
+        language: 'TypeScript',
+        license: { spdx_id: 'MIT' },
+        topics: ['migration'],
+        created_at: '2022-01-01T00:00:00Z',
+        updated_at: '2026-10-25T09:00:00Z',
+        pushed_at: '2026-10-25T09:00:00Z',
+      });
+    }
+    if (url.startsWith('https://api.telegram.org/')) return jsonResponse({ ok: true, result: { message_id: 1 } });
+    throw new Error(`Unexpected fetch in migration test: ${url}`);
+  };
+
+  const ctx = { waitUntil(promise) { Promise.resolve(promise).catch(() => {}); } };
+  const response = await worker.fetch(new Request('https://worker.test/check', {
+    method: 'POST', headers: { 'X-Check-Secret': migratedEnv.CHECK_SECRET },
+  }), migratedEnv, ctx);
+  const result = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, 0, 'migrating an existing current tag must not send a new-release alert');
+  assert.equal(previousReleaseCalls, 1, 'the legacy history backfill should happen only once');
+
+  const overviewResponse = await worker.fetch(new Request('https://worker.test/api/overview'), migratedEnv, ctx);
+  const overview = await overviewResponse.json();
+  const repository = overview.repositories[0];
+  assert.equal(repository.latestTag, 'v1.4.0');
+  assert.equal(repository.previousTag, 'v1.3.0');
+  assert.equal(repository.history[0].changeType, 'baseline');
+  assert.equal(repository.history[0].previousTag, 'v1.3.0');
+  assert.equal(repository.history[1].changeType, 'backfill');
+
+  const repeatResponse = await worker.fetch(new Request('https://worker.test/check', {
+    method: 'POST', headers: { 'X-Check-Secret': migratedEnv.CHECK_SECRET },
+  }), migratedEnv, ctx);
+  const repeatResult = await repeatResponse.json();
+  assert.equal(repeatResult.repositories[0].previousTag, 'v1.3.0');
+  assert.equal(previousReleaseCalls, 1, 'a migrated history must not be backfilled on every scan');
 });
 
 test('long release notes are formatted and split into valid Telegram-size messages', async (t) => {
@@ -206,8 +338,20 @@ test('Worker protects manual check endpoints and reports health', async () => {
   const ctx = { waitUntil(promise) { Promise.resolve(promise).catch(() => {}); } };
   const unauthenticated = await worker.fetch(new Request('https://worker.test/check', { method: 'POST' }), env, ctx);
   assert.equal(unauthenticated.status, 401);
+  const preflight = await worker.fetch(new Request('https://worker.test/check', {
+    method: 'OPTIONS',
+    headers: {
+      Origin: env.PUBLIC_SITE_ORIGIN,
+      'Access-Control-Request-Method': 'POST',
+      'Access-Control-Request-Headers': 'x-check-secret,x-scan-source',
+    },
+  }), env, ctx);
+  assert.equal(preflight.status, 204);
+  assert.match(preflight.headers.get('Access-Control-Allow-Headers'), /X-Check-Secret/i);
+
   const health = await worker.fetch(new Request('https://worker.test/health'), env, ctx);
   const data = await health.json();
   assert.equal(data.ok, true);
   assert.equal(data.repositoryCount, 1);
+  assert.equal(data.scheduledCron, null);
 });

@@ -6,7 +6,8 @@
  * - Sends formatted Telegram notifications with safe HTML, quotes, inline code,
  *   direct release/download links, and inline keyboard buttons.
  * - Supports /start, /help, /stop, /repos, /latest, /status and admin-only /check.
- * - Uses KV to persist users, release state, and last-check status.
+ * - Uses Cloudflare KV as a durable key-value database for users, snapshots, version history, and scan state.
+ * - Reads cached snapshots by default; only authenticated scan triggers call GitHub API.
  * - Provides a read-only JSON endpoint for the companion GitHub Pages dashboard.
  * - Verifies Telegram webhook secret tokens when configured.
  */
@@ -39,10 +40,6 @@ class NoPublishedReleaseError extends Error {
 }
 
 export default {
-  async scheduled(_event, env, ctx) {
-    ctx.waitUntil(checkAllRepos(env));
-  },
-
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = normalizePath(url.pathname);
@@ -82,21 +79,22 @@ export default {
       }
 
       if (path === '/check') {
+        if (request.method === 'OPTIONS') return corsPreflight(request, env);
         if (request.method !== 'POST') {
-          return jsonResponse({ ok: false, error: 'Use POST with the X-Check-Secret header.' }, 405);
+          return withCors(request, env, jsonResponse({ ok: false, error: 'Use POST with the X-Check-Secret header.' }, 405, { Allow: 'POST, OPTIONS' }));
         }
         if (!env.CHECK_SECRET) {
-          return jsonResponse({
+          return withCors(request, env, jsonResponse({
             ok: false,
-            error: 'Set the CHECK_SECRET Worker secret to enable authenticated manual checks.',
-          }, 503);
+            error: 'Set the CHECK_SECRET Worker secret to enable authenticated repository scans.',
+          }, 503));
         }
         const supplied = request.headers.get('X-Check-Secret') || '';
         if (!timingSafeEqual(supplied, env.CHECK_SECRET)) {
-          return jsonResponse({ ok: false, error: 'Unauthorized.' }, 401);
+          return withCors(request, env, jsonResponse({ ok: false, error: 'Unauthorized.' }, 401));
         }
-        const summary = await checkAllRepos(env);
-        return jsonResponse({ ok: true, ...summary });
+        const summary = await checkAllRepos(env, { source: request.headers.get('X-Scan-Source') || 'manual' });
+        return withCors(request, env, jsonResponse({ ok: true, ...summary }));
       }
 
       if (path === '/health' || path === '/api/health') {
@@ -105,7 +103,8 @@ export default {
           service: SERVICE_NAME,
           checkedAt: new Date().toISOString(),
           repositoryCount: getRepos(env).length,
-          scheduledCron: '0 * * * *',
+          scheduledCron: null,
+          scanSchedule: 'GitHub Actions daily + authenticated manual scan',
         }));
       }
 
@@ -263,8 +262,8 @@ function corsHeaders(request, env) {
   const allowed = env.PUBLIC_SITE_ORIGIN || 'https://mehrdadmb2.github.io';
   return {
     'Access-Control-Allow-Origin': origin === allowed ? allowed : allowed,
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Check-Secret, X-Scan-Source',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin',
   };
@@ -286,6 +285,46 @@ function getReleaseKey(repo) {
 
 function getCheckKey(repo) {
   return `check:${repo}`;
+}
+
+function getRepoKey(repo) {
+  return `repo:${repo}`;
+}
+
+function getHistoryKey(repo) {
+  return `history:${repo}`;
+}
+
+function getSnapshotsKey(repo) {
+  return `snapshots:${repo}`;
+}
+
+function parseJsonArray(raw) {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function readHistory(namespace, repo) {
+  return parseJsonArray(await namespace.get(getHistoryKey(repo)));
+}
+
+async function writeHistory(namespace, repo, items) {
+  await namespace.put(getHistoryKey(repo), JSON.stringify(items.slice(0, 100)));
+}
+
+async function appendDailySnapshot(namespace, repo, snapshot) {
+  const key = getSnapshotsKey(repo);
+  const snapshots = parseJsonArray(await namespace.get(key));
+  const sameDay = snapshots.findIndex((item) => item.day === snapshot.day);
+  if (sameDay >= 0) snapshots[sameDay] = snapshot;
+  else snapshots.push(snapshot);
+  snapshots.sort((a, b) => String(a.day).localeCompare(String(b.day)));
+  await namespace.put(key, JSON.stringify(snapshots.slice(-180)));
 }
 
 function parseStoredRelease(raw) {
@@ -338,7 +377,7 @@ async function countUsers(env) {
 // GitHub API
 // -----------------------------------------------------------------------------
 
-async function githubRequest(url, retries = 2) {
+async function githubRequest(url, retries = 2, env = null) {
   let lastError;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     const controller = new AbortController();
@@ -347,9 +386,10 @@ async function githubRequest(url, retries = 2) {
       const response = await fetch(url, {
         method: 'GET',
         headers: {
-          'User-Agent': 'Release-Notifier-Bot/4.1 (Cloudflare Workers)',
+          'User-Agent': 'Release-Notifier-Bot/5.0 (Cloudflare Workers)',
           'Accept': 'application/vnd.github+json',
           'X-GitHub-Api-Version': '2022-11-28',
+          ...(env?.GITHUB_TOKEN ? { Authorization: `Bearer ${env.GITHUB_TOKEN}` } : {}),
         },
         signal: controller.signal,
       });
@@ -381,22 +421,116 @@ async function githubRequest(url, retries = 2) {
   throw new Error(`GitHub API request failed: ${lastError?.message || 'unknown error'}`);
 }
 
-async function getLatestRelease(repo) {
+function githubRepoApiUrl(repo, suffix = '') {
+  const [owner, name] = repo.split('/');
+  return `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}${suffix}`;
+}
+
+async function getLatestRelease(repo, env = null) {
   if (!isValidRepo(repo)) throw new Error('Repository must use the owner/repo format.');
-  const endpoint = `https://api.github.com/repos/${encodeURIComponent(repo.split('/')[0])}/${encodeURIComponent(repo.split('/')[1])}/releases/latest`;
-  const result = await githubRequest(endpoint);
-  if (result.notFound || !result.data || result.data.draft) throw new NoPublishedReleaseError(repo);
+  const result = await githubRequest(githubRepoApiUrl(repo, '/releases/latest'), 2, env);
+  if (result.notFound || !result.data || result.data.draft || result.data.prerelease) throw new NoPublishedReleaseError(repo);
   return result.data;
 }
 
+async function getRepositoryMetadata(repo, env = null) {
+  const result = await githubRequest(githubRepoApiUrl(repo), 2, env);
+  if (result.notFound || !result.data) throw new Error(`Repository metadata not found for ${repo}.`);
+  const data = result.data;
+  return {
+    fullName: String(data.full_name || repo),
+    description: String(data.description || ''),
+    homepage: safeHttpsUrl(data.homepage, ''),
+    htmlUrl: safeHttpsUrl(data.html_url, `https://github.com/${repo}`),
+    visibility: String(data.visibility || (data.private ? 'private' : 'public')),
+    private: Boolean(data.private),
+    archived: Boolean(data.archived),
+    disabled: Boolean(data.disabled),
+    fork: Boolean(data.fork),
+    language: data.language || null,
+    stars: Number(data.stargazers_count || 0),
+    forks: Number(data.forks_count || 0),
+    watchers: Number(data.subscribers_count || data.watchers_count || 0),
+    openIssues: Number(data.open_issues_count || 0),
+    sizeKb: Number(data.size || 0),
+    defaultBranch: String(data.default_branch || 'main'),
+    license: data.license?.spdx_id || data.license?.name || null,
+    topics: Array.isArray(data.topics) ? data.topics.slice(0, 20) : [],
+    createdAt: data.created_at || null,
+    updatedAt: data.updated_at || null,
+    pushedAt: data.pushed_at || null,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+async function getPreviousStableRelease(repo, latestRelease, env = null) {
+  try {
+    const result = await githubRequest(githubRepoApiUrl(repo, '/releases?per_page=20'), 1, env);
+    if (!Array.isArray(result.data)) return null;
+    const releases = result.data.filter((item) => item && !item.draft && !item.prerelease && item.tag_name !== latestRelease.tag_name);
+    const previous = releases[0];
+    return previous ? releaseStateFromApi(previous) : null;
+  } catch (error) {
+    console.warn(`Could not backfill previous release for ${repo}:`, error?.message || error);
+    return null;
+  }
+}
+
 function releaseStateFromApi(release) {
+  const assets = Array.isArray(release.assets) ? release.assets.filter((asset) => asset && asset.browser_download_url).map((asset) => ({
+    name: String(asset.name || 'Download'),
+    size: Number(asset.size || 0),
+    browser_download_url: safeHttpsUrl(asset.browser_download_url, ''),
+    contentType: asset.content_type || null,
+    downloadCount: Number(asset.download_count || 0),
+    updatedAt: asset.updated_at || null,
+  })) : [];
   return {
     tag: String(release.tag_name || 'untagged'),
     name: String(release.name || ''),
     htmlUrl: safeHttpsUrl(release.html_url, ''),
     publishedAt: release.published_at || release.created_at || '',
+    createdAt: release.created_at || null,
+    updatedAt: release.updated_at || null,
     releaseId: Number(release.id || 0),
     prerelease: Boolean(release.prerelease),
+    body: String(release.body || ''),
+    targetCommitish: String(release.target_commitish || ''),
+    author: release.author?.login || null,
+    assets,
+    assetCount: assets.length,
+    totalAssetBytes: assets.reduce((sum, asset) => sum + Math.max(0, asset.size), 0),
+  };
+}
+
+function toGitHubRelease(stored) {
+  return {
+    id: stored.releaseId || 0,
+    tag_name: stored.tag || 'untagged',
+    name: stored.name || stored.tag || '',
+    html_url: stored.htmlUrl || '',
+    published_at: stored.publishedAt || '',
+    created_at: stored.createdAt || stored.publishedAt || '',
+    updated_at: stored.updatedAt || '',
+    prerelease: Boolean(stored.prerelease),
+    body: stored.body || '',
+    target_commitish: stored.targetCommitish || '',
+    author: stored.author ? { login: stored.author } : null,
+    assets: Array.isArray(stored.assets) ? stored.assets : [],
+  };
+}
+
+function historyRecord(releaseState, previousTag, changeType, recordedAt = new Date().toISOString()) {
+  return {
+    tag: releaseState.tag,
+    name: releaseState.name,
+    htmlUrl: releaseState.htmlUrl,
+    publishedAt: releaseState.publishedAt,
+    releaseId: releaseState.releaseId,
+    prerelease: releaseState.prerelease,
+    previousTag: previousTag || null,
+    changeType,
+    recordedAt,
   };
 }
 
@@ -728,7 +862,7 @@ function fullUtcTimestamp(value) {
   return Number.isNaN(date.getTime()) ? 'Unknown' : date.toUTCString();
 }
 
-function buildReleaseMessage(repo, release) {
+function buildReleaseMessage(repo, release, previousTag = null) {
   const tag = release.tag_name || 'untagged';
   const repoUrl = `https://github.com/${repo}`;
   const releaseUrl = safeHttpsUrl(release.html_url, `${repoUrl}/releases`);
@@ -741,7 +875,8 @@ function buildReleaseMessage(repo, release) {
     '🚀 <b>NEW RELEASE PUBLISHED!</b>',
     '━━━━━━━━━━━━━━━━━━━━━━━━━',
     `📦 <b>Repository:</b> <code>${escapeHtml(repo)}</code> · <a href="${escapeHtml(repoUrl)}">Open repository</a>`,
-    `🏷️ <b>Version:</b> <code>${escapeHtml(tag)}</code>`,
+    `🏷️ <b>New version:</b> <code>${escapeHtml(tag)}</code>`,
+    `🔁 <b>Previous version:</b> <code>${escapeHtml(previousTag || 'Unknown')}</code>`,
     `📝 <b>Release:</b> ${escapeHtml(releaseName)}`,
     `📅 <b>Published:</b> <code>${escapeHtml(published)}</code>`,
     `🧭 <b>Channel:</b> ${release.prerelease ? 'Pre-release' : 'Stable release'}`,
@@ -777,65 +912,73 @@ function buildReleaseMessage(repo, release) {
   return lines.join('\n');
 }
 
-async function buildSingleLatestResponse(repo) {
-  try {
-    const release = await getLatestRelease(repo);
-    const message = buildReleaseMessage(repo, release).replace('🚀 <b>NEW RELEASE PUBLISHED!</b>', '📡 <b>LATEST RELEASE DETAILS</b>');
-    return { message, keyboard: releaseKeyboard(repo, release) };
-  } catch (error) {
-    if (error instanceof NoPublishedReleaseError) {
-      return {
-        message: [
-          '📭 <b>NO STABLE RELEASE FOUND</b>',
-          '━━━━━━━━━━━━━━━━━━━━━━',
-          `📦 <b>Repository</b>  <code>${escapeHtml(repo)}</code>`,
-          '',
-          'This repository does not currently expose a published stable release through GitHub Releases.',
-          `🔗 <a href="https://github.com/${escapeHtml(repo)}/releases">Open releases page</a>`,
-        ].join('\n'),
-        keyboard: { inline_keyboard: [[{ text: '📂 Open repository', url: `https://github.com/${repo}` }]] },
-      };
-    }
+async function buildSingleLatestResponse(repo, env) {
+  const [rawRelease, rawCheck, history] = await Promise.all([
+    env.RELEASES.get(getReleaseKey(repo)),
+    env.RELEASES.get(getCheckKey(repo)),
+    readHistory(env.RELEASES, repo),
+  ]);
+  const stored = parseStoredRelease(rawRelease);
+  const check = parseCheckState(rawCheck);
+  if (!stored) {
+    const status = check?.status === 'error' ? 'The last scan failed.' : 'This repository has not been included in a successful scan yet.';
     return {
-      message: `⚠️ <b>Could not fetch release data</b>\n\n📦 <code>${escapeHtml(repo)}</code>\n<blockquote>${escapeHtml(truncateText(error.message, 240))}</blockquote>`,
+      message: [
+        '🕓 <b>NO STORED RELEASE SNAPSHOT</b>',
+        '━━━━━━━━━━━━━━━━━━━━━━',
+        `📦 <b>Repository:</b> <code>${escapeHtml(repo)}</code>`,
+        escapeHtml(status),
+        'Run the authenticated <code>/check</code> command or wait for the daily GitHub Actions scan.',
+        `🔗 <a href="https://github.com/${escapeHtml(repo)}/releases">Open GitHub releases</a>`,
+      ].join('\n'),
       keyboard: { inline_keyboard: [[{ text: '📂 Open repository', url: `https://github.com/${repo}` }]] },
     };
   }
+  const previousTag = stored.previousTag || history.find((item) => item.tag === stored.tag)?.previousTag || null;
+  const message = buildReleaseMessage(repo, toGitHubRelease(stored), previousTag)
+    .replace('🚀 <b>NEW RELEASE PUBLISHED!</b>', '📡 <b>LATEST STORED RELEASE</b>');
+  return { message, keyboard: releaseKeyboard(repo, toGitHubRelease(stored)) };
 }
 
 async function buildAllLatestResponse(env) {
   const repos = getRepos(env);
   const summaries = await Promise.all(repos.map(async (repo) => {
-    try {
-      const release = await getLatestRelease(repo);
-      const state = releaseStateFromApi(release);
-      const repoUrl = `https://github.com/${repo}`;
-      const releaseUrl = safeHttpsUrl(release.html_url, `${repoUrl}/releases`);
-      const title = truncateText(release.name || state.tag, 100);
-      const assets = Array.isArray(release.assets) ? release.assets.filter((asset) => asset && asset.browser_download_url) : [];
-      const preview = markdownToTelegramBlocks(truncateText(release.body || '', 240)).slice(0, 2);
-      return [
-        `📦 <a href="${escapeHtml(repoUrl)}"><b>${escapeHtml(repo)}</b></a>`,
-        `📝 ${escapeHtml(title)}`,
-        `🏷️ <code>${escapeHtml(state.tag)}</code> · <code>${escapeHtml(fullUtcTimestamp(state.publishedAt))}</code>`,
-        ...preview,
-        `📎 <code>${assets.length}</code> downloadable asset(s) · <a href="${escapeHtml(releaseUrl)}">Open full release</a>`,
-      ].join('\n');
-    } catch (error) {
-      if (error instanceof NoPublishedReleaseError) {
-        return `📦 <a href="https://github.com/${escapeHtml(repo)}"><b>${escapeHtml(repo)}</b></a>\n   📭 <i>No stable release found</i> · <a href="https://github.com/${escapeHtml(repo)}/releases">Releases</a>`;
-      }
-      return `📦 <code>${escapeHtml(repo)}</code>\n   ⚠️ <i>Could not fetch right now</i>`;
+    const [rawRelease, rawCheck] = await Promise.all([
+      env.RELEASES.get(getReleaseKey(repo)),
+      env.RELEASES.get(getCheckKey(repo)),
+    ]);
+    const release = parseStoredRelease(rawRelease);
+    const check = parseCheckState(rawCheck);
+    if (!release) {
+      const detail = check?.status === 'error' ? '⚠️ Last scan failed' : '🕓 Waiting for first snapshot';
+      return `📦 <a href="https://github.com/${escapeHtml(repo)}"><b>${escapeHtml(repo)}</b></a>\n   ${detail}`;
     }
+    const preview = markdownToTelegramBlocks(truncateText(release.body || '', 240)).slice(0, 2);
+    const previous = release.previousTag ? `🔁 <code>${escapeHtml(release.previousTag)}</code> → ` : '';
+    return [
+      `📦 <a href="https://github.com/${escapeHtml(repo)}"><b>${escapeHtml(repo)}</b></a>`,
+      `🏷️ ${previous}<code>${escapeHtml(release.tag)}</code>`,
+      `📝 ${escapeHtml(truncateText(release.name || release.tag, 100))}`,
+      ...preview,
+      `📅 <code>${escapeHtml(fullUtcTimestamp(release.publishedAt))}</code> · <a href="${escapeHtml(release.htmlUrl || `https://github.com/${repo}/releases`)}">Open release</a>`,
+      `📎 <code>${Number(release.assetCount ?? release.assets?.length ?? 0)}</code> asset(s)`,
+    ].join('\n');
   }));
+  const [checks, scanRaw] = await Promise.all([
+    Promise.all(repos.map((repo) => env.RELEASES.get(getCheckKey(repo)))),
+    env.RELEASES.get('meta:last-scan'),
+  ]);
+  const scan = parseCheckState(scanRaw);
+  const checkedCount = checks.map(parseCheckState).filter((item) => item?.checkedAt).length;
   return [
-    '🛰️ <b>WATCHTOWER · LATEST RELEASES</b>',
-    '<i>Live snapshot from GitHub Releases, including release notes previews.</i>',
+    '🛰️ <b>WATCHTOWER · CACHED RELEASE SNAPSHOT</b>',
+    '<i>Read-only data from the last successful repository scan. This command does not call GitHub.</i>',
     '━━━━━━━━━━━━━━━━━━━━━━',
     ...summaries.flatMap((item, index) => index === 0 ? [item] : ['', '────────────────────', item]),
     '',
-    `🗂 <b>Monitored repositories:</b> <code>${repos.length}</code>`,
-    '💡 Use <code>/latest owner/repo</code> to receive the full changelog and download list.',
+    `🗂 <b>Monitored:</b> <code>${repos.length}</code> · <b>Checked:</b> <code>${checkedCount}</code>`,
+    `🕓 <b>Last scan:</b> <code>${escapeHtml(dateLabel(scan?.finishedAt || scan?.startedAt))}</code>`,
+    '💡 Admins can run a fresh scan with <code>/check</code>.',
   ].join('\n');
 }
 
@@ -849,12 +992,14 @@ function buildHelpMessage() {
     '<code>/help</code>  — Show this command guide',
     '<code>/repos</code>  — List watched repositories',
     '<code>/latest</code>  — Latest releases across all repositories',
-    '<code>/latest owner/repo</code>  — Full details for one repository',
+    '<code>/latest owner/repo</code>  — Cached details for one repository',
     '<code>/status</code>  — Service and subscription status',
+    '<code>/check</code>  — Admin-only fresh repository scan',
     '<code>/stop</code>  — Unsubscribe from alerts',
     '━━━━━━━━━━━━━━━━━━━━━━',
-    '🔔 New releases are checked automatically every hour.',
-    '💡 Tip: send a repository link after <code>/latest</code> or use <code>owner/repo</code>.',
+    '🔔 GitHub Actions runs the scheduled scan once per day.',
+    '📦 /repos, /latest, /status, and the website use cached data and never rescan GitHub.',
+    '💡 Only <code>/check</code> or the dashboard scan control starts a fresh scan.',
   ].join('\n');
 }
 
@@ -882,68 +1027,180 @@ async function broadcastToAllUsers(env, message, extra = {}) {
   return { total: users.length, succeeded, failed };
 }
 
-async function checkAllRepos(env) {
+async function checkAllRepos(env, { source = 'manual' } = {}) {
   await requireKv(env);
   const repos = getRepos(env);
   if (!repos.length) throw new Error('No valid repositories are configured in REPOS.');
 
-  const summary = { checked: 0, changed: 0, noRelease: 0, failed: 0, notifiedUsers: 0, repositories: [] };
+  const startedAt = new Date().toISOString();
+  const summary = {
+    source,
+    startedAt,
+    checked: 0,
+    changed: 0,
+    initialized: 0,
+    noRelease: 0,
+    failed: 0,
+    metadataFailed: 0,
+    notifiedUsers: 0,
+    repositories: [],
+  };
   const changedReleases = [];
+
   for (const repo of repos) {
     const now = new Date().toISOString();
-    const priorCheck = parseCheckState(await env.RELEASES.get(getCheckKey(repo)));
+    const [rawExisting, existingMetadataRaw] = await Promise.all([
+      env.RELEASES.get(getReleaseKey(repo)),
+      env.RELEASES.get(getRepoKey(repo)),
+    ]);
+    const existing = parseStoredRelease(rawExisting);
+    let metadata = parseCheckState(existingMetadataRaw);
+    let metadataStatus = metadata ? 'stale' : 'missing';
+
     try {
-      console.log(`Checking ${repo}…`);
-      const release = await getLatestRelease(repo);
+      console.log(`Checking ${repo} (${source})…`);
+      const metadataResult = await getRepositoryMetadata(repo, env).then((value) => ({ ok: true, value })).catch((error) => ({ ok: false, error }));
+      if (metadataResult.ok) {
+        metadata = metadataResult.value;
+        metadataStatus = 'ok';
+        await env.RELEASES.put(getRepoKey(repo), JSON.stringify(metadata));
+      } else {
+        summary.metadataFailed += 1;
+        console.warn(`Metadata refresh failed for ${repo}:`, metadataResult.error?.message || metadataResult.error);
+        if (/Repository metadata not found/i.test(String(metadataResult.error?.message || ''))) {
+          await env.RELEASES.put(getCheckKey(repo), JSON.stringify({ checkedAt: now, status: 'not-found', metadataStatus: 'missing', source }));
+          summary.failed += 1;
+          summary.repositories.push({ repo, status: 'not-found', metadataStatus: 'missing' });
+          continue;
+        }
+      }
+
+      let release;
+      try {
+        release = await getLatestRelease(repo, env);
+      } catch (error) {
+        if (error instanceof NoPublishedReleaseError) {
+          const checkState = { checkedAt: now, status: 'no-release', metadataStatus, source };
+          await env.RELEASES.put(getCheckKey(repo), JSON.stringify(checkState));
+          if (metadata) {
+            const day = now.slice(0, 10);
+            await appendDailySnapshot(env.RELEASES, repo, {
+              day, checkedAt: now, latestTag: existing?.tag || null,
+              stars: metadata.stars, forks: metadata.forks, watchers: metadata.watchers,
+              openIssues: metadata.openIssues, sizeKb: metadata.sizeKb,
+              language: metadata.language, pushedAt: metadata.pushedAt,
+            });
+          }
+          summary.checked += 1;
+          summary.noRelease += 1;
+          summary.repositories.push({ repo, status: 'no-release', metadataStatus });
+          console.log(`No stable release published for ${repo}.`);
+          continue;
+        }
+        throw error;
+      }
+
       const newState = releaseStateFromApi(release);
-      const rawExisting = await env.RELEASES.get(getReleaseKey(repo));
-      const existing = parseStoredRelease(rawExisting);
-      const wasKnownNoRelease = priorCheck?.status === 'no-release';
       const firstSeen = !existing;
       const changed = Boolean(existing && existing.tag !== newState.tag);
+      let history = await readHistory(env.RELEASES, repo);
+      let previousTag = existing?.tag || null;
 
-      const legacyValueNeedsMigration = Boolean(rawExisting && !rawExisting.trimStart().startsWith('{'));
-      if (firstSeen || changed || legacyValueNeedsMigration) {
-        // Migrate legacy plain-tag values without triggering a notification.
-        await env.RELEASES.put(getReleaseKey(repo), JSON.stringify(newState));
-      }
-      await env.RELEASES.put(getCheckKey(repo), JSON.stringify({ checkedAt: now, status: 'ok' }));
-      summary.checked += 1;
-
-      const shouldNotifyFirstSeen = String(env.NOTIFY_ON_FIRST_SEEN || 'false').toLowerCase() === 'true';
-      if (changed || (firstSeen && (wasKnownNoRelease || shouldNotifyFirstSeen))) {
-        changedReleases.push({ repo, release });
+      if (firstSeen) {
+        // Backfill the immediately previous stable release once, so the first dashboard
+        // snapshot can already show a meaningful previous → current comparison.
+        const previousRelease = await getPreviousStableRelease(repo, release, env);
+        if (previousRelease) {
+          previousTag = previousRelease.tag;
+          history.unshift(historyRecord(previousRelease, null, 'backfill', now));
+        }
+        newState.previousTag = previousTag;
+        history.unshift(historyRecord(newState, previousTag, 'baseline', now));
+        summary.initialized += 1;
+        const notifyFirstSeen = String(env.NOTIFY_ON_FIRST_SEEN || 'false').toLowerCase() === 'true';
+        if (notifyFirstSeen) {
+          changedReleases.push({ repo, release, previousTag });
+          summary.changed += 1;
+        }
+      } else if (changed) {
+        newState.previousTag = existing.tag;
+        history.unshift(historyRecord(newState, existing.tag, 'release', now));
+        changedReleases.push({ repo, release, previousTag: existing.tag });
         summary.changed += 1;
-        console.log(`New release detected: ${repo} ${newState.tag}`);
-      } else if (firstSeen) {
-        console.log(`Initialized release baseline for ${repo}: ${newState.tag} (no old-release alert).`);
+        console.log(`New release detected: ${repo} ${existing.tag} → ${newState.tag}`);
       } else {
-        console.log(`No new release: ${repo} ${newState.tag}`);
+        if (!history.length) {
+          // Migrate legacy installations that already stored the current tag but did not
+          // maintain a version-history key. Backfill once, then persist a baseline record.
+          const previousRelease = await getPreviousStableRelease(repo, release, env);
+          let migratedPreviousTag = null;
+          if (previousRelease) {
+            migratedPreviousTag = previousRelease.tag;
+            history.unshift(historyRecord(previousRelease, null, 'backfill', now));
+          }
+          newState.previousTag = migratedPreviousTag;
+          previousTag = migratedPreviousTag;
+          history.unshift(historyRecord(newState, migratedPreviousTag, 'baseline', now));
+        } else {
+          newState.previousTag = existing.previousTag || history.find((item) => item.tag === existing.tag)?.previousTag || null;
+          previousTag = newState.previousTag;
+        }
+        // Keep the previous tag even when GitHub release metadata changes without a tag change.
       }
-      summary.repositories.push({ repo, status: changed ? 'updated' : (firstSeen ? 'initialized' : 'ok'), tag: newState.tag });
+
+      await Promise.all([
+        env.RELEASES.put(getReleaseKey(repo), JSON.stringify(newState)),
+        writeHistory(env.RELEASES, repo, history),
+        env.RELEASES.put(getCheckKey(repo), JSON.stringify({ checkedAt: now, status: 'ok', metadataStatus, source })),
+      ]);
+
+      if (metadata) {
+        const day = now.slice(0, 10);
+        await appendDailySnapshot(env.RELEASES, repo, {
+          day,
+          checkedAt: now,
+          latestTag: newState.tag,
+          stars: metadata.stars,
+          forks: metadata.forks,
+          watchers: metadata.watchers,
+          openIssues: metadata.openIssues,
+          sizeKb: metadata.sizeKb,
+          language: metadata.language,
+          pushedAt: metadata.pushedAt,
+        });
+      }
+
+      summary.checked += 1;
+      summary.repositories.push({ repo, status: changed ? 'updated' : (firstSeen ? 'initialized' : 'ok'), latestTag: newState.tag, previousTag, metadataStatus });
+      if (firstSeen) console.log(`Initialized baseline for ${repo}: ${previousTag || '—'} → ${newState.tag}.`);
     } catch (error) {
-      if (error instanceof NoPublishedReleaseError) {
-        await env.RELEASES.put(getCheckKey(repo), JSON.stringify({ checkedAt: now, status: 'no-release' }));
-        summary.checked += 1;
-        summary.noRelease += 1;
-        summary.repositories.push({ repo, status: 'no-release' });
-        console.log(`No stable release published for ${repo}.`);
-      } else {
-        await env.RELEASES.put(getCheckKey(repo), JSON.stringify({ checkedAt: now, status: 'error' })).catch(() => {});
-        summary.failed += 1;
-        summary.repositories.push({ repo, status: 'error' });
-        console.error(`Repository check failed for ${repo}:`, error?.message || error);
-      }
+      const checkState = { checkedAt: now, status: 'error', metadataStatus, source, error: truncateText(error?.message || error, 220) };
+      await env.RELEASES.put(getCheckKey(repo), JSON.stringify(checkState)).catch(() => {});
+      summary.failed += 1;
+      summary.repositories.push({ repo, status: 'error', metadataStatus, error: checkState.error });
+      console.error(`Repository check failed for ${repo}:`, error?.message || error);
     }
   }
 
   for (const item of changedReleases) {
-    const message = buildReleaseMessage(item.repo, item.release);
+    const message = buildReleaseMessage(item.repo, item.release, item.previousTag);
     const result = await broadcastToAllUsers(env, message, { reply_markup: releaseKeyboard(item.repo, item.release) });
     summary.notifiedUsers += result.succeeded;
   }
 
   summary.finishedAt = new Date().toISOString();
+  await env.RELEASES.put('meta:last-scan', JSON.stringify({
+    source: summary.source,
+    startedAt: summary.startedAt,
+    finishedAt: summary.finishedAt,
+    checked: summary.checked,
+    changed: summary.changed,
+    initialized: summary.initialized,
+    noRelease: summary.noRelease,
+    failed: summary.failed,
+    metadataFailed: summary.metadataFailed,
+    notifiedUsers: summary.notifiedUsers,
+  }));
   console.log('Check summary:', JSON.stringify(summary));
   return summary;
 }
@@ -952,35 +1209,72 @@ async function buildOverview(env) {
   await requireKv(env);
   const repos = getRepos(env);
   const repositoryData = await Promise.all(repos.map(async (repo) => {
-    const [rawRelease, rawCheck] = await Promise.all([
+    const [rawRelease, rawCheck, rawMetadata, rawHistory, rawSnapshots] = await Promise.all([
       env.RELEASES.get(getReleaseKey(repo)),
       env.RELEASES.get(getCheckKey(repo)),
+      env.RELEASES.get(getRepoKey(repo)),
+      env.RELEASES.get(getHistoryKey(repo)),
+      env.RELEASES.get(getSnapshotsKey(repo)),
     ]);
     const release = parseStoredRelease(rawRelease);
     const check = parseCheckState(rawCheck);
+    const metadata = parseCheckState(rawMetadata) || {};
+    const history = parseJsonArray(rawHistory);
+    const snapshots = parseJsonArray(rawSnapshots);
     return {
       fullName: repo,
       url: `https://github.com/${repo}`,
       releasesUrl: `https://github.com/${repo}/releases`,
       latestTag: release?.tag || null,
+      previousTag: release?.previousTag || history.find((item) => item.tag === release?.tag)?.previousTag || null,
       releaseName: release?.name || null,
       publishedAt: release?.publishedAt || null,
       releaseUrl: release?.htmlUrl || null,
+      releaseBody: release?.body || '',
+      releaseAssetCount: Number(release?.assetCount ?? release?.assets?.length ?? 0),
+      releaseAssets: Array.isArray(release?.assets) ? release.assets : [],
+      releaseId: release?.releaseId || null,
+      prerelease: Boolean(release?.prerelease),
       lastChecked: check?.checkedAt || null,
+      checkStatus: check?.status || (release ? 'ok' : 'pending'),
+      metadataStatus: check?.metadataStatus || (metadata?.fullName ? 'ok' : 'missing'),
       state: check?.status || (release ? 'ok' : 'pending'),
+      description: metadata.description || '',
+      homepage: metadata.homepage || null,
+      language: metadata.language || null,
+      stars: Number(metadata.stars || 0),
+      forks: Number(metadata.forks || 0),
+      watchers: Number(metadata.watchers || 0),
+      openIssues: Number(metadata.openIssues || 0),
+      sizeKb: Number(metadata.sizeKb || 0),
+      defaultBranch: metadata.defaultBranch || null,
+      license: metadata.license || null,
+      topics: Array.isArray(metadata.topics) ? metadata.topics : [],
+      visibility: metadata.visibility || null,
+      archived: Boolean(metadata.archived),
+      createdAt: metadata.createdAt || null,
+      updatedAt: metadata.updatedAt || null,
+      pushedAt: metadata.pushedAt || null,
+      metadataFetchedAt: metadata.fetchedAt || null,
+      history: history.slice(0, 12),
+      snapshots: snapshots.slice(-30),
     };
   }));
-  const users = await countUsers(env);
+  const [users, scanRaw] = await Promise.all([countUsers(env), env.RELEASES.get('meta:last-scan')]);
+  const scan = parseCheckState(scanRaw);
   const checkedTimes = repositoryData.map((repo) => repo.lastChecked).filter(Boolean).sort();
   return {
     ok: true,
     service: SERVICE_NAME,
-    version: '4.1.0',
+    version: '5.0.0',
     generatedAt: new Date().toISOString(),
     lastChecked: checkedTimes.at(-1) || null,
+    scan,
     userCount: users,
     repositoryCount: repositoryData.length,
     releaseCount: repositoryData.filter((repo) => repo.latestTag).length,
+    checkedCount: repositoryData.filter((repo) => repo.lastChecked).length,
+    failedCount: repositoryData.filter((repo) => ['error', 'not-found'].includes(repo.state)).length,
     repositories: repositoryData,
   };
 }
@@ -1030,7 +1324,7 @@ async function handleTelegramUpdate(update, env) {
         '<b>Watching now</b>',
         repoList,
         '',
-        '⏱ <b>Automatic checks:</b> every hour',
+        '⏱ <b>Automatic checks:</b> daily via GitHub Actions',
         '',
         'Use <code>/help</code> to explore commands, or <code>/latest</code> to see current releases.',
       ].join('\n');
@@ -1064,17 +1358,18 @@ async function handleTelegramUpdate(update, env) {
         ]);
         const release = parseStoredRelease(rawRelease);
         const check = parseCheckState(rawCheck);
-        const statusText = check?.status === 'error'
-          ? '⚠️ check failed'
+        const statusText = ['error', 'not-found'].includes(check?.status)
+          ? (check?.status === 'not-found' ? '⛔ repository unavailable' : '⚠️ check failed')
           : check?.status === 'no-release'
             ? '📭 no stable release'
             : release?.tag
               ? `🏷 <code>${escapeHtml(release.tag)}</code>`
               : '🕓 waiting for first check';
         lines.push('', `📦 <a href="https://github.com/${escapeHtml(repo)}"><b>${escapeHtml(repo)}</b></a>`, `   ${statusText}`);
+        if (release?.previousTag) lines.push(`   🔁 <code>${escapeHtml(release.previousTag)}</code> → <code>${escapeHtml(release.tag)}</code>`);
         if (check?.checkedAt) lines.push(`   <i>Checked: ${escapeHtml(dateLabel(check.checkedAt))}</i>`);
       }
-      lines.push('', '💡 Use <code>/latest owner/repo</code> for live release details.');
+      lines.push('', '💡 Use <code>/latest owner/repo</code> for stored release details. Only admins can refresh with <code>/check</code>.');
       await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, lines.join('\n').slice(0, TELEGRAM_TEXT_LIMIT - 8));
       return;
     }
@@ -1090,7 +1385,7 @@ async function handleTelegramUpdate(update, env) {
           '⚠️ <b>Repository format not recognized.</b>\n\nUse <code>/latest owner/repo</code> or send a GitHub repository URL.');
         return;
       }
-      const latest = await buildSingleLatestResponse(repo);
+      const latest = await buildSingleLatestResponse(repo, env);
       await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, latest.message, { reply_markup: latest.keyboard });
       return;
     }
@@ -1099,6 +1394,7 @@ async function handleTelegramUpdate(update, env) {
       const [users, overview] = await Promise.all([countUsers(env), buildOverview(env)]);
       const latestCheck = overview.lastChecked ? dateLabel(overview.lastChecked) : 'Not checked yet';
       const errors = overview.repositories.filter((repo) => repo.state === 'error').length;
+      const metadataMissing = overview.repositories.filter((repo) => repo.metadataStatus !== 'ok').length;
       const noRelease = overview.repositories.filter((repo) => repo.state === 'no-release').length;
       const status = [
         '🧪 <b>SYSTEM STATUS</b>',
@@ -1109,8 +1405,9 @@ async function handleTelegramUpdate(update, env) {
         `🏷️ <b>Known latest releases:</b> <code>${overview.releaseCount}</code>`,
         `📭 <b>No stable release:</b> <code>${noRelease}</code>`,
         `⚠️ <b>Last-check errors:</b> <code>${errors}</code>`,
+        `🧾 <b>Metadata pending/errors:</b> <code>${metadataMissing}</code>`,
         `🕓 <b>Last activity:</b> <code>${escapeHtml(latestCheck)}</code>`,
-        '⏱ <b>Schedule:</b> every hour',
+        `⏱ <b>Schedule:</b> daily · source <code>${escapeHtml(overview.scan?.source || 'not run')}</code>`,
         '━━━━━━━━━━━━━━━━━━━━━━',
         'Use <code>/repos</code> for the full watchlist.',
       ].join('\n');
@@ -1153,6 +1450,7 @@ async function configureTelegramWebhook(workerUrl, env) {
     { command: 'repos', description: 'List watched repositories' },
     { command: 'latest', description: 'Show latest releases' },
     { command: 'status', description: 'Show bot status' },
+    { command: 'check', description: 'Admin: scan repositories now' },
     { command: 'stop', description: 'Unsubscribe from release alerts' },
   ];
   const menu = await telegramCall(env.TELEGRAM_BOT_TOKEN, 'setMyCommands', { commands });
@@ -1171,5 +1469,5 @@ function buildWorkerLanding(env, requestUrl) {
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>Release Watcher · Worker Status</title>
 <style>
 :root{color-scheme:dark;--bg:#070b16;--panel:#10182b;--line:rgba(166,190,255,.16);--text:#eef3ff;--muted:#9aa9c8;--cyan:#55e6ff;--violet:#a78bfa}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(ellipse at 20% 15%,#162a4d 0,transparent 44%),radial-gradient(ellipse at 90% 85%,#272053 0,transparent 42%),var(--bg);font:16px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;color:var(--text)}main{max-width:740px;width:100%;padding:clamp(24px,5vw,48px);border:1px solid var(--line);border-radius:30px;background:linear-gradient(135deg,rgba(22,34,59,.94),rgba(12,17,32,.86));box-shadow:0 35px 100px #0008,inset 0 1px #ffffff0c;position:relative;overflow:hidden}main:before{content:"";position:absolute;right:-100px;top:-100px;width:280px;height:280px;border-radius:50%;background:var(--cyan);filter:blur(100px);opacity:.15;pointer-events:none}.mark{width:64px;height:64px;display:grid;place-items:center;border:1px solid #55e6ff55;border-radius:20px;background:linear-gradient(135deg,#55e6ff24,#a78bfa23);font-size:30px}.eyebrow{margin:22px 0 8px;color:var(--cyan);font-size:12px;font-weight:800;letter-spacing:.18em;text-transform:uppercase}h1{font-size:clamp(32px,6vw,54px);line-height:1.05;letter-spacing:-.05em;margin:0}p{color:var(--muted);max-width:570px}.pill{display:inline-flex;align-items:center;gap:9px;margin-top:16px;border:1px solid #52f2af40;background:#40dfa912;border-radius:99px;padding:7px 12px;color:#83f6c3;font-weight:700;font-size:13px}.dot{width:7px;height:7px;border-radius:50%;background:#59f0ad;box-shadow:0 0 12px #59f0ad}.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:28px 0}.stat{padding:17px;border:1px solid var(--line);border-radius:17px;background:#ffffff04}.stat b{font-size:24px;display:block}.stat span{font-size:12px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}.actions{display:flex;gap:12px;flex-wrap:wrap}.actions a{color:var(--text);text-decoration:none;padding:12px 16px;border:1px solid var(--line);border-radius:13px;background:#ffffff08;font-weight:700}.actions a.primary{background:linear-gradient(110deg,#55e6ff,#a78bfa);border:0;color:#07111e}.foot{font-size:12px;margin-top:28px;color:#7888a8}@media(max-width:500px){main{border-radius:22px}.stats{grid-template-columns:1fr 1fr}.actions a{flex:1;text-align:center}}
-</style></head><body><main><div class="mark">🛰️</div><div class="eyebrow">Cloudflare edge service</div><h1>Release Watcher<br>is online.</h1><p>The Worker endpoint is responding. Scheduled checks monitor your configured GitHub repositories and deliver release alerts through Telegram.</p><div class="pill"><span class="dot"></span> Worker response healthy</div><div class="stats"><div class="stat"><b>${repoCount}</b><span>Configured repositories</span></div><div class="stat"><b>60 min</b><span>Scheduled interval</span></div></div><div class="actions"><a class="primary" href="${escapeHtml(siteUrl)}">Open dashboard ↗</a><a href="https://github.com/mehrdadmb2/release-notifier-bot">Source code ↗</a><a href="/health">Health JSON ↗</a></div><div class="foot">${host} · GitHub Release Watcher v4.1.0 · Do not share setup secrets.</div></main></body></html>`;
+</style></head><body><main><div class="mark">🛰️</div><div class="eyebrow">Cloudflare edge service</div><h1>Release Watcher<br>is online.</h1><p>The Worker endpoint is responding. GitHub Actions performs a daily repository scan; authenticated manual scans are also available. All other dashboard and bot requests read cached KV data.</p><div class="pill"><span class="dot"></span> Worker response healthy</div><div class="stats"><div class="stat"><b>${repoCount}</b><span>Configured repositories</span></div><div class="stat"><b>Daily</b><span>GitHub Actions scan</span></div></div><div class="actions"><a class="primary" href="${escapeHtml(siteUrl)}">Open dashboard ↗</a><a href="https://github.com/mehrdadmb2/release-notifier-bot">Source code ↗</a><a href="/health">Health JSON ↗</a></div><div class="foot">${host} · GitHub Release Watcher v5.0.0 · Do not share setup secrets.</div></main></body></html>`;
 }
