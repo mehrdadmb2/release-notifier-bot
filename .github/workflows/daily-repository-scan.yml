@@ -1,0 +1,54 @@
+name: Daily repository scan
+
+on:
+  schedule:
+    # Daily at 02:17 UTC. GitHub may delay scheduled workflows during peak load.
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-watcher-repository-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    name: Ask Cloudflare Worker to refresh the persisted snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validate required secret
+        shell: bash
+        env:
+          WORKER_CHECK_SECRET: ${{ secrets.WORKER_CHECK_SECRET }}
+        run: |
+          if [[ -z "$WORKER_CHECK_SECRET" ]]; then
+            echo "Missing repository secret: WORKER_CHECK_SECRET"
+            exit 1
+          fi
+
+      - name: Trigger authenticated Worker scan
+        shell: bash
+        env:
+          WORKER_URL: https://release-watcher-bot.game-developer-mb.workers.dev
+          WORKER_CHECK_SECRET: ${{ secrets.WORKER_CHECK_SECRET }}
+        run: |
+          set -euo pipefail
+          response="$(curl --silent --show-error --fail-with-body \
+            --retry 3 --retry-all-errors --retry-delay 5 \
+            --connect-timeout 15 --max-time 840 \
+            -X POST "${WORKER_URL%/}/check" \
+            -H "X-Check-Secret: ${WORKER_CHECK_SECRET}" \
+            -H "X-Scan-Source: github-actions-daily" \
+            -H "Accept: application/json")"
+          echo "$response" | jq .
+          echo "$response" | jq -e '.ok == true' >/dev/null
+          failed="$(echo "$response" | jq -r '.failed // 0')"
+          metadata_failed="$(echo "$response" | jq -r '.metadataFailed // 0')"
+          if [[ "$failed" != "0" || "$metadata_failed" != "0" ]]; then
+            echo "Worker scan completed with ${failed} release/check error(s) and ${metadata_failed} metadata error(s)."
+            exit 1
+          fi
+          echo "Repository snapshot refreshed successfully."
