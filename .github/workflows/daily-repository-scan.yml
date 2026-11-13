@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   scan:
-    name: Ask Cloudflare Worker to refresh the persisted snapshot
+    name: Refresh the persisted repository snapshot
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -24,10 +24,42 @@ jobs:
         env:
           WORKER_CHECK_SECRET: ${{ secrets.WORKER_CHECK_SECRET }}
         run: |
+          set -euo pipefail
           if [[ -z "$WORKER_CHECK_SECRET" ]]; then
             echo "Missing repository secret: WORKER_CHECK_SECRET"
+            echo "This secret must exactly match the Cloudflare Worker CHECK_SECRET."
             exit 1
           fi
+
+      - name: Verify Worker and GitHub API authentication configuration
+        shell: bash
+        env:
+          WORKER_URL: https://release-watcher-bot.game-developer-mb.workers.dev
+        run: |
+          set -euo pipefail
+          set +e
+          response="$(curl --silent --show-error --fail-with-body \
+            --connect-timeout 15 --max-time 30 \
+            "${WORKER_URL%/}/health")"
+          curl_status=$?
+          set -e
+          if [[ "$curl_status" -ne 0 ]]; then
+            echo "Could not reach Worker health endpoint (curl exit ${curl_status})."
+            echo "$response" | jq . 2>/dev/null || printf '%s\n' "$response"
+            exit 1
+          fi
+          echo "$response" | jq .
+          if ! echo "$response" | jq -e '.ok == true' >/dev/null; then
+            echo "Cloudflare Worker health check failed."
+            exit 1
+          fi
+          if ! echo "$response" | jq -e '.githubAuthConfigured == true' >/dev/null; then
+            echo "GITHUB_TOKEN is not configured in the Cloudflare Worker."
+            echo "Run: npx wrangler secret put GITHUB_TOKEN"
+            echo "Then redeploy the Worker and run this workflow again."
+            exit 1
+          fi
+          echo "Worker is reachable and GitHub token configuration is present."
 
       - name: Trigger authenticated Worker scan
         shell: bash
@@ -36,17 +68,44 @@ jobs:
           WORKER_CHECK_SECRET: ${{ secrets.WORKER_CHECK_SECRET }}
         run: |
           set -euo pipefail
+          set +e
           response="$(curl --silent --show-error --fail-with-body \
-            --retry 3 --retry-all-errors --retry-delay 5 \
             --connect-timeout 15 --max-time 840 \
             -X POST "${WORKER_URL%/}/check" \
             -H "X-Check-Secret: ${WORKER_CHECK_SECRET}" \
             -H "X-Scan-Source: github-actions-daily" \
             -H "Accept: application/json")"
+          curl_status=$?
+          set -e
+          if [[ "$curl_status" -ne 0 ]]; then
+            echo "Worker returned an HTTP or network error (curl exit ${curl_status})."
+            echo "$response" | jq . 2>/dev/null || printf '%s\n' "$response"
+            exit 1
+          fi
           echo "$response" | jq .
-          echo "$response" | jq -e '.ok == true' >/dev/null
+
+          if ! echo "$response" | jq -e '.ok == true' >/dev/null; then
+            code="$(echo "$response" | jq -r '.code // "unknown"')"
+            error="$(echo "$response" | jq -r '.error // "Worker rejected the scan"')"
+            echo "Worker scan could not start: ${code} — ${error}"
+            exit 1
+          fi
+
           failed="$(echo "$response" | jq -r '.failed // 0')"
           metadata_failed="$(echo "$response" | jq -r '.metadataFailed // 0')"
+          rate_limited="$(echo "$response" | jq -r '.rateLimited // false')"
+          reset_at="$(echo "$response" | jq -r '.rateLimitResetAt // "unknown"')"
+          github_auth_failed="$(echo "$response" | jq -r '.githubAuthFailed // false')"
+          github_auth_code="$(echo "$response" | jq -r '.githubAuthErrorCode // "unknown"')"
+          if [[ "$github_auth_failed" == "true" ]]; then
+            echo "GitHub rejected the Worker token or its permissions (${github_auth_code})."
+            echo "Check GITHUB_TOKEN in Cloudflare and its Metadata: Read-only + Contents: Read-only permissions."
+            exit 1
+          fi
+          if [[ "$rate_limited" == "true" ]]; then
+            echo "GitHub API rate limit reached. No further repositories were queried. Reset: ${reset_at}"
+            exit 1
+          fi
           if [[ "$failed" != "0" || "$metadata_failed" != "0" ]]; then
             echo "Worker scan completed with ${failed} release/check error(s) and ${metadata_failed} metadata error(s)."
             exit 1
