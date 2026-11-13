@@ -96,6 +96,8 @@ function normalizeApiRepository(item, index) {
     publishedAt: item.publishedAt || null,
     lastChecked: item.lastChecked || null,
     state: item.state || (item.latestTag ? 'ok' : 'pending'),
+    checkError: item.checkError || null,
+    rateLimitResetAt: item.rateLimitResetAt || null,
     previousTag: item.previousTag || null,
     language: item.language || null,
     stars: Number(item.stars || 0),
@@ -122,7 +124,7 @@ function normalizeApiRepository(item, index) {
 
 function currentFilterCount(filter) {
   if (filter === 'released') return state.repositories.filter((repo) => Boolean(repo.latestTag)).length;
-  if (filter === 'pending') return state.repositories.filter((repo) => !repo.latestTag || ['error', 'no-release', 'not-found'].includes(repo.state)).length;
+  if (filter === 'pending') return state.repositories.filter((repo) => !repo.latestTag || ['error', 'no-release', 'not-found', 'rate-limited'].includes(repo.state)).length;
   return state.repositories.length;
 }
 
@@ -132,7 +134,7 @@ function filteredRepositories() {
     const queryMatches = !query || `${repo.fullName} ${repo.description}`.toLowerCase().includes(query);
     let filterMatches = true;
     if (state.filter === 'released') filterMatches = Boolean(repo.latestTag);
-    if (state.filter === 'pending') filterMatches = !repo.latestTag || ['error', 'no-release', 'not-found'].includes(repo.state);
+    if (state.filter === 'pending') filterMatches = !repo.latestTag || ['error', 'no-release', 'not-found', 'rate-limited'].includes(repo.state);
     return queryMatches && filterMatches;
   });
 
@@ -143,6 +145,7 @@ function filteredRepositories() {
 }
 
 function getRepoState(repo) {
+  if (repo.state === 'rate-limited') return { label: 'API RATE LIMITED', className: 'state-error' };
   if (repo.state === 'error') return { label: 'CHECK ISSUE', className: 'state-error' };
   if (repo.state === 'not-found') return { label: 'NOT FOUND', className: 'state-error' };
   if (repo.state === 'no-release') return { label: 'NO STABLE RELEASE', className: 'state-none' };
@@ -193,7 +196,7 @@ function renderRepository(repo, index) {
   const displayState = getRepoState(repo);
   const dateValue = repo.publishedAt || repo.lastChecked;
   const dateLabel = repo.publishedAt ? 'Published' : 'Last checked';
-  const versionValue = repo.latestTag || (repo.state === 'no-release' ? 'No stable release' : repo.state === 'error' ? 'Retry required' : 'Waiting for first scan');
+  const versionValue = repo.latestTag || (repo.state === 'no-release' ? 'No stable release' : ['error', 'rate-limited'].includes(repo.state) ? 'Retry required' : 'Waiting for first scan');
   const releaseUrl = repo.releaseUrl && /^https:\/\//i.test(repo.releaseUrl) ? repo.releaseUrl : repo.releasesUrl;
   const safeFullName = escapeHtml(repo.fullName);
   const safeDescription = escapeHtml(repo.description || 'GitHub repository · awaiting metadata snapshot');
@@ -212,6 +215,8 @@ function renderRepository(repo, index) {
     ['Last metadata update', shortDate(repo.updatedAt) || '—'],
     ['Last push', pushedLabel],
     ['Archived', repo.metadataFetchedAt ? (repo.archived ? 'Yes' : 'No') : '—'],
+    ...(repo.rateLimitResetAt ? [['API rate limit reset', formatLocalDate(repo.rateLimitResetAt)]] : []),
+    ...(repo.checkError ? [['Last check message', repo.checkError]] : []),
   ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`).join('');
   const assets = (repo.releaseAssets || []).filter((asset) => asset && /^https:\/\//i.test(asset.browser_download_url || '')).slice(0, 6);
   const assetsMarkup = assets.length
@@ -305,7 +310,12 @@ function updateMetrics(overview) {
   byId('footerStatus').textContent = state.connected ? 'Snapshot API connected' : 'Fallback watchlist';
   const scan = overview.scan || {};
   const scanMeta = byId('scanMeta');
-  if (scanMeta) scanMeta.textContent = scan.finishedAt ? `LAST SCAN ${formatLocalDate(scan.finishedAt)} · ${String(scan.source || 'unknown').toUpperCase()}` : 'DAILY SCAN · GITHUB ACTIONS · WAITING FOR FIRST RUN';
+  if (scanMeta) {
+    const base = scan.finishedAt ? `LAST SCAN ${formatLocalDate(scan.finishedAt)} · ${String(scan.source || 'unknown').toUpperCase()}` : 'DAILY SCAN · GITHUB ACTIONS · WAITING FOR FIRST RUN';
+    scanMeta.textContent = scan.rateLimited
+      ? `${base} · API RATE LIMITED${scan.rateLimitResetAt ? ` UNTIL ${formatLocalDate(scan.rateLimitResetAt)}` : ''}`
+      : (Number(scan.failed || 0) > 0 ? `${base} · ${scan.failed} ISSUE(S)` : base);
+  }
 }
 
 function setSyncStatus(kind, title, detail) {
@@ -343,7 +353,12 @@ async function loadOverview({ quiet = false } = {}) {
     const detail = scan.finishedAt
       ? `${payload.checkedCount ?? 0}/${payload.repositoryCount ?? 0} repos checked · ${String(scan.source || 'scan').replace(/-/g, ' ')} · ${formatLocalDate(scan.finishedAt)}`
       : `Connected · waiting for first scan · snapshot ${formatLocalDate(state.lastUpdated)}`;
-    setSyncStatus('connected', 'Worker connected', detail);
+    if (scan.rateLimited) {
+      const reset = scan.rateLimitResetAt ? `Retry after ${formatLocalDate(scan.rateLimitResetAt)}` : 'Wait before retrying';
+      setSyncStatus('warning', 'GitHub API rate limited', `${detail} · ${reset}`);
+    } else {
+      setSyncStatus('connected', 'Worker connected', detail);
+    }
     updateMetrics(payload);
     renderGrid();
     if (!quiet) showToast('Watchlist snapshot refreshed');
@@ -405,7 +420,9 @@ async function runManualScan(secret) {
     const result = await response.json().catch(() => ({}));
     if (!response.ok || result.ok !== true) throw new Error(result.error || `Worker returned HTTP ${response.status}`);
     byId('scanDialog').close();
-    showToast(`Scan complete · ${result.checked} checked · ${result.changed} release update(s)`);
+    showToast(result.rateLimited
+      ? `GitHub rate limited · retry after ${result.rateLimitResetAt ? formatLocalDate(result.rateLimitResetAt) : 'a short wait'}`
+      : `Scan complete · ${result.checked} checked · ${result.changed} release update(s)`);
     await loadOverview({ quiet: true });
   } catch (error) {
     hint.textContent = error?.message || 'Scan failed. Verify the secret and try again.';

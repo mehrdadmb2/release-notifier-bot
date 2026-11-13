@@ -25,6 +25,7 @@ const DEFAULT_REPOS = [
 
 const SERVICE_NAME = 'GitHub Release Watcher';
 const API_TIMEOUT_MS = 10_000;
+const GITHUB_API_CACHE_PREFIX = 'github-cache:';
 const TELEGRAM_TEXT_LIMIT = 4096;
 const TELEGRAM_CHUNK_TARGET = 3800;
 const MAX_RELEASE_NOTE_LENGTH = 6_500;
@@ -36,6 +37,41 @@ class NoPublishedReleaseError extends Error {
     super(`No published stable release exists for ${repo}.`);
     this.name = 'NoPublishedReleaseError';
     this.repo = repo;
+  }
+}
+
+class GitHubRateLimitError extends Error {
+  constructor(message, { resetAt = null, retryAfter = null, resource = null } = {}) {
+    super(message);
+    this.name = 'GitHubRateLimitError';
+    this.code = 'GITHUB_RATE_LIMITED';
+    this.resetAt = resetAt;
+    this.retryAfter = retryAfter;
+    this.resource = resource;
+  }
+}
+
+class GitHubAuthError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'GitHubAuthError';
+    this.code = 'GITHUB_AUTH_FAILED';
+  }
+}
+
+class GitHubPermissionError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'GitHubPermissionError';
+    this.code = 'GITHUB_PERMISSION_DENIED';
+  }
+}
+
+class GitHubTokenRequiredError extends Error {
+  constructor() {
+    super('GITHUB_TOKEN is missing. Add an authenticated GitHub token to the Cloudflare Worker before running scans.');
+    this.name = 'GitHubTokenRequiredError';
+    this.code = 'GITHUB_TOKEN_REQUIRED';
   }
 }
 
@@ -93,8 +129,18 @@ export default {
         if (!timingSafeEqual(supplied, env.CHECK_SECRET)) {
           return withCors(request, env, jsonResponse({ ok: false, error: 'Unauthorized.' }, 401));
         }
-        const summary = await checkAllRepos(env, { source: request.headers.get('X-Scan-Source') || 'manual' });
-        return withCors(request, env, jsonResponse({ ok: true, ...summary }));
+        try {
+          const summary = await checkAllRepos(env, { source: request.headers.get('X-Scan-Source') || 'manual' });
+          return withCors(request, env, jsonResponse({ ok: true, ...summary }));
+        } catch (error) {
+          const configurationError = error instanceof GitHubTokenRequiredError || error instanceof GitHubAuthError || error instanceof GitHubPermissionError;
+          const status = error instanceof GitHubTokenRequiredError ? 503 : configurationError ? 502 : 500;
+          return withCors(request, env, jsonResponse({
+            ok: false,
+            code: error?.code || 'SCAN_START_FAILED',
+            error: truncateText(error?.message || 'Could not start repository scan.', 500),
+          }, status));
+        }
       }
 
       if (path === '/health' || path === '/api/health') {
@@ -103,6 +149,8 @@ export default {
           service: SERVICE_NAME,
           checkedAt: new Date().toISOString(),
           repositoryCount: getRepos(env).length,
+          githubAuthConfigured: Boolean(env.GITHUB_TOKEN),
+          githubAuthMode: env.GITHUB_TOKEN ? 'authenticated' : 'missing-token',
           scheduledCron: null,
           scanSchedule: 'GitHub Actions daily + authenticated manual scan',
         }));
@@ -377,42 +425,123 @@ async function countUsers(env) {
 // GitHub API
 // -----------------------------------------------------------------------------
 
-async function githubRequest(url, retries = 2, env = null) {
+async function readGithubApiCache(env, cacheKey) {
+  if (!cacheKey || !env?.RELEASES) return null;
+  try {
+    const raw = await env.RELEASES.get(`${GITHUB_API_CACHE_PREFIX}${cacheKey}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && Object.hasOwn(parsed, 'data') ? parsed : null;
+  } catch (error) {
+    console.warn(`Could not read GitHub API cache (${cacheKey}):`, error?.message || error);
+    return null;
+  }
+}
+
+async function writeGithubApiCache(env, cacheKey, etag, data) {
+  if (!cacheKey || !env?.RELEASES) return;
+  try {
+    // The raw API response is retained so a later HTTP 304 can be served without
+    // another rate-limit-consuming payload request.
+    await env.RELEASES.put(`${GITHUB_API_CACHE_PREFIX}${cacheKey}`, JSON.stringify({
+      etag: etag || null,
+      data,
+      cachedAt: new Date().toISOString(),
+    }));
+  } catch (error) {
+    // Cache failures must never discard a successful GitHub response.
+    console.warn(`Could not persist GitHub API cache (${cacheKey}):`, error?.message || error);
+  }
+}
+
+function isGitHubRateLimitResponse(status, body, remaining) {
+  const message = String(body || '').toLowerCase();
+  return status === 429 || remaining === '0' || (
+    status === 403 && (message.includes('rate limit') || message.includes('secondary rate limit') || message.includes('abuse detection'))
+  );
+}
+
+async function githubRequest(url, retries = 2, env = null, cacheKey = null) {
+  if (!env?.GITHUB_TOKEN) throw new GitHubTokenRequiredError();
+
+  const cached = await readGithubApiCache(env, cacheKey);
+  let useEtag = Boolean(cached?.etag && Object.hasOwn(cached, 'data'));
   let lastError;
+
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort('GitHub request timed out'), API_TIMEOUT_MS);
+    const headers = {
+      'User-Agent': 'Release-Notifier-Bot/5.0.1 (Cloudflare Workers)',
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+    };
+    if (useEtag) headers['If-None-Match'] = cached.etag;
+
     try {
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'Release-Notifier-Bot/5.0 (Cloudflare Workers)',
-          'Accept': 'application/vnd.github+json',
-          'X-GitHub-Api-Version': '2022-11-28',
-          ...(env?.GITHUB_TOKEN ? { Authorization: `Bearer ${env.GITHUB_TOKEN}` } : {}),
-        },
-        signal: controller.signal,
-      });
+      const response = await fetch(url, { method: 'GET', headers, signal: controller.signal });
       clearTimeout(timeout);
 
-      if (response.status === 404) return { notFound: true, data: null };
-      if (response.status === 403 || response.status === 429) {
-        const retryAfter = Number(response.headers.get('Retry-After') || 0);
-        const reset = Number(response.headers.get('X-RateLimit-Reset') || 0);
-        const remaining = response.headers.get('X-RateLimit-Remaining');
-        if (attempt < retries && (retryAfter > 0 || remaining === '0')) {
-          const waitMs = retryAfter > 0 ? retryAfter * 1000 : Math.max(500, Math.min(3000, reset * 1000 - Date.now()));
-          await sleep(waitMs);
+      if (response.status === 304) {
+        if (cached && Object.hasOwn(cached, 'data')) {
+          return { notFound: false, data: cached.data, notModified: true };
+        }
+        // An orphaned ETag can happen after manual KV edits. Retry once without it.
+        if (useEtag) {
+          useEtag = false;
           continue;
         }
+        throw new Error('GitHub returned 304 but no cached response body was available.');
       }
+
+      if (response.status === 404) return { notFound: true, data: null };
+
+      if (response.status === 401) {
+        const detail = truncateText(await response.text(), 260);
+        throw new GitHubAuthError(`GitHub rejected GITHUB_TOKEN (401). The token may be expired, revoked, or malformed. ${detail}`);
+      }
+
+      if (response.status === 403 || response.status === 429) {
+        const body = truncateText(await response.text(), 320);
+        const remaining = response.headers.get('X-RateLimit-Remaining');
+        const reset = Number(response.headers.get('X-RateLimit-Reset') || 0);
+        const retryAfter = Number(response.headers.get('Retry-After') || 0);
+        const resource = response.headers.get('X-RateLimit-Resource') || null;
+        if (isGitHubRateLimitResponse(response.status, body, remaining)) {
+          const waitSeconds = retryAfter > 0 ? retryAfter : 60;
+          const resetAt = reset > 0
+            ? new Date(reset * 1000).toISOString()
+            : new Date(Date.now() + waitSeconds * 1000).toISOString();
+          const detail = remaining === '0'
+            ? `Primary rate limit exhausted; reset at ${resetAt}.`
+            : `Secondary rate limit or abuse protection was triggered; wait at least ${waitSeconds} second(s), until approximately ${resetAt}.`;
+          throw new GitHubRateLimitError(`GitHub API rate limit exceeded. ${detail} The scan was stopped to avoid wasting more requests. ${body}`, {
+            resetAt,
+            retryAfter: waitSeconds,
+            resource,
+          });
+        }
+        const accepted = response.headers.get('X-Accepted-GitHub-Permissions');
+        const permissionError = new GitHubPermissionError(`GitHub API ${response.status}: ${body}${accepted ? ` Required permissions: ${accepted}.` : ''}`);
+        permissionError.statusCode = response.status;
+        throw permissionError;
+      }
+
       if (!response.ok) {
-        const detail = truncateText(await response.text(), 220);
-        throw new Error(`GitHub API ${response.status}: ${detail}`);
+        const detail = truncateText(await response.text(), 260);
+        const error = new Error(`GitHub API ${response.status}: ${detail}`);
+        error.statusCode = response.status;
+        throw error;
       }
-      return { notFound: false, data: await response.json() };
+
+      const data = await response.json();
+      await writeGithubApiCache(env, cacheKey, response.headers.get('ETag'), data);
+      return { notFound: false, data, notModified: false };
     } catch (error) {
       lastError = error;
+      if (error instanceof GitHubRateLimitError || error instanceof GitHubAuthError || error instanceof GitHubPermissionError || error instanceof GitHubTokenRequiredError) throw error;
+      if (error?.statusCode === 403 || error?.statusCode === 404) throw error;
       if (attempt < retries) await sleep(500 * (attempt + 1));
     } finally {
       clearTimeout(timeout);
@@ -428,13 +557,13 @@ function githubRepoApiUrl(repo, suffix = '') {
 
 async function getLatestRelease(repo, env = null) {
   if (!isValidRepo(repo)) throw new Error('Repository must use the owner/repo format.');
-  const result = await githubRequest(githubRepoApiUrl(repo, '/releases/latest'), 2, env);
+  const result = await githubRequest(githubRepoApiUrl(repo, '/releases/latest'), 2, env, `latest-release:${repo}`);
   if (result.notFound || !result.data || result.data.draft || result.data.prerelease) throw new NoPublishedReleaseError(repo);
   return result.data;
 }
 
 async function getRepositoryMetadata(repo, env = null) {
-  const result = await githubRequest(githubRepoApiUrl(repo), 2, env);
+  const result = await githubRequest(githubRepoApiUrl(repo), 2, env, `repository:${repo}`);
   if (result.notFound || !result.data) throw new Error(`Repository metadata not found for ${repo}.`);
   const data = result.data;
   return {
@@ -465,12 +594,13 @@ async function getRepositoryMetadata(repo, env = null) {
 
 async function getPreviousStableRelease(repo, latestRelease, env = null) {
   try {
-    const result = await githubRequest(githubRepoApiUrl(repo, '/releases?per_page=20'), 1, env);
+    const result = await githubRequest(githubRepoApiUrl(repo, '/releases?per_page=20'), 1, env, `release-list:${repo}`);
     if (!Array.isArray(result.data)) return null;
     const releases = result.data.filter((item) => item && !item.draft && !item.prerelease && item.tag_name !== latestRelease.tag_name);
     const previous = releases[0];
     return previous ? releaseStateFromApi(previous) : null;
   } catch (error) {
+    if (error instanceof GitHubRateLimitError || error instanceof GitHubAuthError || error instanceof GitHubTokenRequiredError) throw error;
     console.warn(`Could not backfill previous release for ${repo}:`, error?.message || error);
     return null;
   }
@@ -1029,6 +1159,7 @@ async function broadcastToAllUsers(env, message, extra = {}) {
 
 async function checkAllRepos(env, { source = 'manual' } = {}) {
   await requireKv(env);
+  if (!env.GITHUB_TOKEN) throw new GitHubTokenRequiredError();
   const repos = getRepos(env);
   if (!repos.length) throw new Error('No valid repositories are configured in REPOS.');
 
@@ -1042,6 +1173,13 @@ async function checkAllRepos(env, { source = 'manual' } = {}) {
     noRelease: 0,
     failed: 0,
     metadataFailed: 0,
+    rateLimited: false,
+    rateLimitResetAt: null,
+    rateLimitRetryAfter: null,
+    rateLimitResource: null,
+    authenticated: true,
+    githubAuthFailed: false,
+    githubAuthErrorCode: null,
     notifiedUsers: 0,
     repositories: [],
   };
@@ -1067,6 +1205,20 @@ async function checkAllRepos(env, { source = 'manual' } = {}) {
       } else {
         summary.metadataFailed += 1;
         console.warn(`Metadata refresh failed for ${repo}:`, metadataResult.error?.message || metadataResult.error);
+        if (metadataResult.error instanceof GitHubRateLimitError) {
+          summary.failed += 1;
+          summary.rateLimited = true;
+          summary.rateLimitResetAt = metadataResult.error.resetAt;
+          summary.rateLimitRetryAfter = metadataResult.error.retryAfter;
+          summary.rateLimitResource = metadataResult.error.resource;
+          const checkState = { checkedAt: now, status: 'rate-limited', metadataStatus, source, error: truncateText(metadataResult.error.message, 220), resetAt: metadataResult.error.resetAt };
+          await env.RELEASES.put(getCheckKey(repo), JSON.stringify(checkState));
+          summary.repositories.push({ repo, status: 'rate-limited', metadataStatus, resetAt: metadataResult.error.resetAt, error: checkState.error });
+          break;
+        }
+        if (metadataResult.error instanceof GitHubAuthError || metadataResult.error instanceof GitHubPermissionError || metadataResult.error instanceof GitHubTokenRequiredError) {
+          throw metadataResult.error;
+        }
         if (/Repository metadata not found/i.test(String(metadataResult.error?.message || ''))) {
           await env.RELEASES.put(getCheckKey(repo), JSON.stringify({ checkedAt: now, status: 'not-found', metadataStatus: 'missing', source }));
           summary.failed += 1;
@@ -1174,11 +1326,35 @@ async function checkAllRepos(env, { source = 'manual' } = {}) {
       summary.repositories.push({ repo, status: changed ? 'updated' : (firstSeen ? 'initialized' : 'ok'), latestTag: newState.tag, previousTag, metadataStatus });
       if (firstSeen) console.log(`Initialized baseline for ${repo}: ${previousTag || '—'} → ${newState.tag}.`);
     } catch (error) {
-      const checkState = { checkedAt: now, status: 'error', metadataStatus, source, error: truncateText(error?.message || error, 220) };
+      const checkState = {
+        checkedAt: now,
+        status: error instanceof GitHubRateLimitError ? 'rate-limited' : 'error',
+        metadataStatus,
+        source,
+        error: truncateText(error?.message || error, 220),
+        ...(error instanceof GitHubRateLimitError ? { resetAt: error.resetAt } : {}),
+      };
       await env.RELEASES.put(getCheckKey(repo), JSON.stringify(checkState)).catch(() => {});
       summary.failed += 1;
-      summary.repositories.push({ repo, status: 'error', metadataStatus, error: checkState.error });
+      if (error instanceof GitHubRateLimitError) {
+        summary.rateLimited = true;
+        summary.rateLimitResetAt = error.resetAt;
+        summary.rateLimitRetryAfter = error.retryAfter;
+        summary.rateLimitResource = error.resource;
+      }
+      if (error instanceof GitHubAuthError || error instanceof GitHubPermissionError || error instanceof GitHubTokenRequiredError) {
+        summary.githubAuthFailed = true;
+        summary.githubAuthErrorCode = error.code || 'GITHUB_AUTH_ERROR';
+      }
+      summary.repositories.push({
+        repo,
+        status: error instanceof GitHubRateLimitError ? 'rate-limited' : 'error',
+        metadataStatus,
+        ...(error instanceof GitHubRateLimitError ? { resetAt: error.resetAt } : {}),
+        error: checkState.error,
+      });
       console.error(`Repository check failed for ${repo}:`, error?.message || error);
+      if (error instanceof GitHubRateLimitError || error instanceof GitHubAuthError || error instanceof GitHubPermissionError || error instanceof GitHubTokenRequiredError) break;
     }
   }
 
@@ -1199,6 +1375,13 @@ async function checkAllRepos(env, { source = 'manual' } = {}) {
     noRelease: summary.noRelease,
     failed: summary.failed,
     metadataFailed: summary.metadataFailed,
+    rateLimited: summary.rateLimited,
+    rateLimitResetAt: summary.rateLimitResetAt,
+    rateLimitRetryAfter: summary.rateLimitRetryAfter,
+    rateLimitResource: summary.rateLimitResource,
+    authenticated: summary.authenticated,
+    githubAuthFailed: summary.githubAuthFailed,
+    githubAuthErrorCode: summary.githubAuthErrorCode,
     notifiedUsers: summary.notifiedUsers,
   }));
   console.log('Check summary:', JSON.stringify(summary));
@@ -1256,6 +1439,8 @@ async function buildOverview(env) {
       updatedAt: metadata.updatedAt || null,
       pushedAt: metadata.pushedAt || null,
       metadataFetchedAt: metadata.fetchedAt || null,
+      checkError: check?.error || null,
+      rateLimitResetAt: check?.resetAt || null,
       history: history.slice(0, 12),
       snapshots: snapshots.slice(-30),
     };
@@ -1266,7 +1451,7 @@ async function buildOverview(env) {
   return {
     ok: true,
     service: SERVICE_NAME,
-    version: '5.0.0',
+    version: '5.0.1',
     generatedAt: new Date().toISOString(),
     lastChecked: checkedTimes.at(-1) || null,
     scan,
@@ -1274,7 +1459,7 @@ async function buildOverview(env) {
     repositoryCount: repositoryData.length,
     releaseCount: repositoryData.filter((repo) => repo.latestTag).length,
     checkedCount: repositoryData.filter((repo) => repo.lastChecked).length,
-    failedCount: repositoryData.filter((repo) => ['error', 'not-found'].includes(repo.state)).length,
+    failedCount: repositoryData.filter((repo) => ['error', 'not-found', 'rate-limited'].includes(repo.state)).length,
     repositories: repositoryData,
   };
 }
@@ -1393,7 +1578,7 @@ async function handleTelegramUpdate(update, env) {
     if (cmd === '/status') {
       const [users, overview] = await Promise.all([countUsers(env), buildOverview(env)]);
       const latestCheck = overview.lastChecked ? dateLabel(overview.lastChecked) : 'Not checked yet';
-      const errors = overview.repositories.filter((repo) => repo.state === 'error').length;
+      const errors = overview.repositories.filter((repo) => ['error', 'rate-limited'].includes(repo.state)).length;
       const metadataMissing = overview.repositories.filter((repo) => repo.metadataStatus !== 'ok').length;
       const noRelease = overview.repositories.filter((repo) => repo.state === 'no-release').length;
       const status = [
@@ -1422,8 +1607,23 @@ async function handleTelegramUpdate(update, env) {
           '🔒 <b>Admin command</b>\n\nManual checks are restricted. Automatic checks continue on schedule.');
         return;
       }
+      if (!env.GITHUB_TOKEN) {
+        await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId,
+          '⚠️ <b>GitHub authentication is not configured.</b>\n\nAdd a valid <code>GITHUB_TOKEN</code> Worker secret before starting a repository scan.');
+        return;
+      }
       await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '🔄 <b>Manual check started</b>\n\nI am checking the configured repositories now.');
-      const summary = await checkAllRepos(env);
+      const summary = await checkAllRepos(env, { source: 'telegram-admin' });
+      if (summary.rateLimited) {
+        await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId,
+          `⚠️ <b>GitHub API rate limit reached</b>\n\n📦 Checked before stop: <code>${summary.checked}</code>\n⛔ Failed: <code>${summary.failed}</code>\n🕒 Reset time: <code>${escapeHtml(summary.rateLimitResetAt || 'not provided by GitHub')}</code>\n\nThe scan stopped automatically to avoid sending more requests. Try again after the reset time.`);
+        return;
+      }
+      if (summary.githubAuthFailed) {
+        await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId,
+          `🔐 <b>GitHub token or permission error</b>\n\nCode: <code>${escapeHtml(summary.githubAuthErrorCode || 'GITHUB_AUTH_ERROR')}</code>\nCheck the Cloudflare Worker <code>GITHUB_TOKEN</code> secret and its read-only repository permissions.`);
+        return;
+      }
       await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId,
         `✅ <b>Check complete</b>\n\n📦 Checked: <code>${summary.checked}</code>\n🚀 New releases: <code>${summary.changed}</code>\n⚠️ Failed: <code>${summary.failed}</code>`);
       return;
@@ -1469,5 +1669,5 @@ function buildWorkerLanding(env, requestUrl) {
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>Release Watcher · Worker Status</title>
 <style>
 :root{color-scheme:dark;--bg:#070b16;--panel:#10182b;--line:rgba(166,190,255,.16);--text:#eef3ff;--muted:#9aa9c8;--cyan:#55e6ff;--violet:#a78bfa}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(ellipse at 20% 15%,#162a4d 0,transparent 44%),radial-gradient(ellipse at 90% 85%,#272053 0,transparent 42%),var(--bg);font:16px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;color:var(--text)}main{max-width:740px;width:100%;padding:clamp(24px,5vw,48px);border:1px solid var(--line);border-radius:30px;background:linear-gradient(135deg,rgba(22,34,59,.94),rgba(12,17,32,.86));box-shadow:0 35px 100px #0008,inset 0 1px #ffffff0c;position:relative;overflow:hidden}main:before{content:"";position:absolute;right:-100px;top:-100px;width:280px;height:280px;border-radius:50%;background:var(--cyan);filter:blur(100px);opacity:.15;pointer-events:none}.mark{width:64px;height:64px;display:grid;place-items:center;border:1px solid #55e6ff55;border-radius:20px;background:linear-gradient(135deg,#55e6ff24,#a78bfa23);font-size:30px}.eyebrow{margin:22px 0 8px;color:var(--cyan);font-size:12px;font-weight:800;letter-spacing:.18em;text-transform:uppercase}h1{font-size:clamp(32px,6vw,54px);line-height:1.05;letter-spacing:-.05em;margin:0}p{color:var(--muted);max-width:570px}.pill{display:inline-flex;align-items:center;gap:9px;margin-top:16px;border:1px solid #52f2af40;background:#40dfa912;border-radius:99px;padding:7px 12px;color:#83f6c3;font-weight:700;font-size:13px}.dot{width:7px;height:7px;border-radius:50%;background:#59f0ad;box-shadow:0 0 12px #59f0ad}.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:28px 0}.stat{padding:17px;border:1px solid var(--line);border-radius:17px;background:#ffffff04}.stat b{font-size:24px;display:block}.stat span{font-size:12px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}.actions{display:flex;gap:12px;flex-wrap:wrap}.actions a{color:var(--text);text-decoration:none;padding:12px 16px;border:1px solid var(--line);border-radius:13px;background:#ffffff08;font-weight:700}.actions a.primary{background:linear-gradient(110deg,#55e6ff,#a78bfa);border:0;color:#07111e}.foot{font-size:12px;margin-top:28px;color:#7888a8}@media(max-width:500px){main{border-radius:22px}.stats{grid-template-columns:1fr 1fr}.actions a{flex:1;text-align:center}}
-</style></head><body><main><div class="mark">🛰️</div><div class="eyebrow">Cloudflare edge service</div><h1>Release Watcher<br>is online.</h1><p>The Worker endpoint is responding. GitHub Actions performs a daily repository scan; authenticated manual scans are also available. All other dashboard and bot requests read cached KV data.</p><div class="pill"><span class="dot"></span> Worker response healthy</div><div class="stats"><div class="stat"><b>${repoCount}</b><span>Configured repositories</span></div><div class="stat"><b>Daily</b><span>GitHub Actions scan</span></div></div><div class="actions"><a class="primary" href="${escapeHtml(siteUrl)}">Open dashboard ↗</a><a href="https://github.com/mehrdadmb2/release-notifier-bot">Source code ↗</a><a href="/health">Health JSON ↗</a></div><div class="foot">${host} · GitHub Release Watcher v5.0.0 · Do not share setup secrets.</div></main></body></html>`;
+</style></head><body><main><div class="mark">🛰️</div><div class="eyebrow">Cloudflare edge service</div><h1>Release Watcher<br>is online.</h1><p>The Worker endpoint is responding. GitHub Actions performs a daily repository scan; authenticated manual scans are also available. All other dashboard and bot requests read cached KV data.</p><div class="pill"><span class="dot"></span> Worker response healthy</div><div class="stats"><div class="stat"><b>${repoCount}</b><span>Configured repositories</span></div><div class="stat"><b>Daily</b><span>GitHub Actions scan</span></div></div><div class="actions"><a class="primary" href="${escapeHtml(siteUrl)}">Open dashboard ↗</a><a href="https://github.com/mehrdadmb2/release-notifier-bot">Source code ↗</a><a href="/health">Health JSON ↗</a></div><div class="foot">${host} · GitHub Release Watcher v5.0.1 · Do not share setup secrets.</div></main></body></html>`;
 }

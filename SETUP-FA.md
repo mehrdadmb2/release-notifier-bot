@@ -66,13 +66,50 @@ npx wrangler secret put ADMIN_CHAT_IDS
 - `CHECK_SECRET`: کلید اصلی اجرای اسکن از API و داشبورد.
 - `ADMIN_CHAT_IDS`: شناسه عددی چت مدیر یا مدیران. برای چند مدیر، IDها را با ویرگول جدا کن، مثلاً `123456789,987654321`.
 
-`GITHUB_TOKEN` اختیاری است. برای ۸ ریپوی عمومی، معمولاً API عمومی GitHub کافی است؛ در صورت افزایش تعداد ریپوها یا برخورد با Rate Limit، یک Fine-grained Personal Access Token با دسترسی فقط خواندن Metadata و Contents/Release ریپوهای موردنیاز بساز و در Worker ذخیره کن:
+`GITHUB_TOKEN` برای اجرای اسکن در نسخه 5.0.1 **اجباری** است. API عمومی GitHub سهمیه احراز هویت‌نشده محدودی دارد و IP خروجی Cloudflare ممکن است بین کاربران Workerها مشترک باشد؛ بنابراین حتی فهرست کوچک ریپوها هم نباید به سهمیه ناشناس متکی باشد.
+
+**ساخت توکن خواندنی GitHub:**
+
+1. در GitHub به `Settings → Developer settings → Personal access tokens → Fine-grained tokens` برو و یک توکن جدید بساز.
+2. برای این پروژه فقط دسترسی خواندن لازم است. برای ریپوهای عمومی، دسترسی عمومی/خواندنی را انتخاب کن؛ اگر ریپوی خصوصی هم مانیتور می‌کنی، همان ریپو را در Repository access قرار بده.
+3. در Repository permissions این دسترسی‌ها را تنظیم کن:
+   - `Metadata: Read-only` (معمولاً به‌صورت پیش‌فرض فعال است).
+   - `Contents: Read-only` (برای خواندن Releaseها).
+4. هیچ دسترسی Write، Administration، Actions یا Secrets لازم نیست.
+5. توکن را فقط به‌عنوان Secret داخل Cloudflare Worker ذخیره کن:
 
 ```powershell
 npx wrangler secret put GITHUB_TOKEN
 ```
 
-این توکن را در GitHub Pages، JavaScript یا `wrangler.toml` قرار نده.
+مقدار توکن را در Cloudflare وارد کن و سپس Worker را Deploy کن:
+
+```powershell
+npm run deploy
+```
+
+6. پس از Deploy، این آدرس را باز کن:
+
+`https://release-watcher-bot.game-developer-mb.workers.dev/health`
+
+باید این فیلد را ببینی:
+
+```json
+{
+  "githubAuthConfigured": true,
+  "githubAuthMode": "authenticated"
+}
+```
+
+این فقط وجود Secret را تأیید می‌کند، نه اعتبار یا مجوز آن را؛ اعتبار واقعی هنگام اسکن مشخص می‌شود. توکن را در GitHub Pages، JavaScript، فایل `wrangler.toml` یا Repository Variables قرار نده. آن را در GitHub Actions هم لازم نیست ذخیره کنی؛ درخواست اسکن از Worker انجام می‌شود و Worker خودش از Secret استفاده می‌کند.
+
+### بهینه‌سازی و مدیریت Rate Limit در v5.0.1
+
+- برای Metadata و Latest Release از درخواست‌های شرطی `ETag / If-None-Match` استفاده می‌شود؛ پاسخ `304 Not Modified` از Payload ذخیره‌شده در KV بازیابی می‌شود.
+- اگر GitHub سهمیه اصلی یا ثانویه را محدود کند، اسکن بلافاصله متوقف می‌شود؛ دیگر برای ریپوهای بعدی درخواست تکراری نمی‌فرستد.
+- زمان Reset و منبع Rate Limit در خروجی اسکن ثبت می‌شود.
+- پاسخ `401` به‌عنوان توکن نامعتبر/منقضی و خطاهای مجوز `403` جداگانه گزارش می‌شوند.
+- GitHub Action قبل از اسکن `/health` را بررسی می‌کند و در صورت نبودن Secret، پیام راهنمای واضح می‌دهد.
 
 ## ۴. Deploy Worker
 
@@ -236,10 +273,10 @@ npx wrangler tail
 
 - **سایت خالی یا `Worker API unavailable`:** ابتدا `/health` را باز کن. سپس `RELEASES` binding و ID آن را بررسی کن. بعد از تغییر Bindingها یک اسکن دستی اجرا کن.
 - **همه داده‌ها خالی هستند:** احتمالاً Worker به Namespace خالی یا اشتباه متصل شده است. ID Namespace قبلی را بازیابی کن؛ ساختن یک KV جدید داده‌های قبلی را برنمی‌گرداند.
-- **GitHub Action با 401 شکست می‌خورد:** مقدار `WORKER_CHECK_SECRET` در GitHub را با `CHECK_SECRET` در Worker مقایسه کن.
+- **GitHub Action با 401 شکست می‌خورد:** مقدار `WORKER_CHECK_SECRET` در GitHub را با `CHECK_SECRET` در Worker مقایسه کن. خطای 401 از خود GitHub نشان می‌دهد `GITHUB_TOKEN` در Cloudflare نامعتبر یا منقضی است.
 - **GitHub Action با خطای 404 مواجه می‌شود:** آدرس `WORKER_URL` در Workflow و نام Worker را بررسی کن.
 - **یک Repo وضعیت `not-found` دارد:** املای `owner/repo`، عمومی/خصوصی بودن ریپو و دسترسی `GITHUB_TOKEN` را بررسی کن.
-- **خطای Rate Limit:** در Worker یک `GITHUB_TOKEN` معتبر با دسترسی خواندن اضافه کن و تعداد ریپوها را بازبینی کن.
+- **خطای Rate Limit:** اسکن اکنون در اولین خطای Rate Limit متوقف می‌شود. `GITHUB_TOKEN` را به‌عنوان Worker Secret تنظیم کن، زمان `rateLimitResetAt` را بررسی کن و پس از Reset دوباره اسکن کن. اجرای مکرر Workflow پیش از Reset مشکل را حل نمی‌کند.
 - **ربات پیام نمی‌دهد:** `TELEGRAM_BOT_TOKEN`، Webhook، `TELEGRAM_WEBHOOK_SECRET` و لاگ‌های `npx wrangler tail` را بررسی کن.
 
 هیچ‌کدام از Secretها را در GitHub Pages، JavaScript سمت کاربر یا فایل‌های عمومی قرار نده.

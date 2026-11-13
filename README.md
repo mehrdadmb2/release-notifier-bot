@@ -1,4 +1,4 @@
-# 🛰️ Release Watcher v5.0
+# 🛰️ Release Watcher v5.0.1
 
 **Every release. One signal.** A GitHub Release monitor built with Cloudflare Workers, Cloudflare KV, Telegram Bot API, GitHub Actions, and a static GitHub Pages dashboard.
 
@@ -45,6 +45,17 @@ There is no Cloudflare Cron trigger in v5.0. This prevents duplicate scheduled s
 - Telegram notification shows both **New version** and **Previous version**, alongside changelog, publish time, assets, and direct links.
 - `/latest` is now cache-only; it no longer sends one GitHub API request per tracked repository.
 - The Worker health endpoint and deployment landing page describe the daily Action-based schedule.
+
+## Rate-limit recovery (v5.0.1)
+
+GitHub API scans require the Cloudflare Worker secret `GITHUB_TOKEN`. Create a least-privilege fine-grained token with `Metadata: Read-only` and `Contents: Read-only` for the repositories to monitor, then run:
+
+```powershell
+npx wrangler secret put GITHUB_TOKEN
+npm run deploy
+```
+
+Open `/health` and confirm `githubAuthConfigured: true`. The dashboard and read-only bot commands do not need this token because they read Cloudflare KV. The scheduled Action checks the health field before triggering a scan. Conditional ETag requests reuse cached payloads on HTTP 304 responses. When GitHub reports a rate limit, the Worker stops scanning further repositories and returns the reset time rather than issuing repeated requests.
 
 ## Telegram commands
 
@@ -125,7 +136,7 @@ See **[SETUP-FA.md](SETUP-FA.md)** for the exact Windows PowerShell + Wrangler s
 | `SET_WEBHOOK_SECRET` | Worker secret | Protect `POST /setwebhook` |
 | `CHECK_SECRET` | Worker secret | Protect `POST /check` |
 | `ADMIN_CHAT_IDS` | Worker secret | Comma-separated Telegram IDs allowed to run `/check` |
-| `GITHUB_TOKEN` | Optional Worker secret | Authenticated GitHub API quota for larger watchlists |
+| `GITHUB_TOKEN` | **Required Worker secret** | Authenticated GitHub API access; prevents reliance on shared unauthenticated Cloudflare egress quota |
 | `WORKER_CHECK_SECRET` | GitHub Actions secret | Must exactly match the Worker `CHECK_SECRET` |
 | `RELEASES` | KV binding | Release state, metadata, history, and daily snapshots |
 | `USERS` | KV binding | Telegram subscriptions |
@@ -145,12 +156,12 @@ The dashboard's GET API is strictly read-only. The only Worker route that starts
 
 ## Reliability and known boundaries
 
-- GitHub 403/429 responses and transient failures are retried with bounded backoff. A `GITHUB_TOKEN` Worker secret is optional but recommended if the watchlist grows significantly.
+- A valid `GITHUB_TOKEN` Worker secret is required before scans start. The Worker uses conditional ETag requests for repository metadata and latest releases, stops immediately when GitHub reports a primary/secondary rate limit, and records the reset time instead of retrying into an exhausted quota. Invalid tokens (401) and insufficient permissions (403) are reported distinctly.
 - Repository metadata and release data are handled independently. A metadata failure does not discard a release update if the release endpoint still succeeds.
 - Missing or inaccessible repositories are marked `not-found`; repositories with no stable GitHub Release are marked `no-release`.
 - Each daily stats collection is deduplicated by UTC date. A manual scan on the same date updates that day's snapshot instead of inflating the timeline.
 - Version history is bounded to 100 entries per repository; daily stats are bounded to 180 days.
-- A failed scan for one repository does not stop the remaining repositories from being processed.
+- Transient errors on one repository do not stop other repositories. Authentication failures and GitHub rate limits stop the scan immediately because subsequent requests would fail or waste quota.
 - The dashboard can show a static fallback list while the Worker is unreachable, but actual release versions and repository metrics require a successful initial scan.
 - GitHub's scheduler is best-effort. `workflow_dispatch` and the dashboard/Telegram manual triggers are available when an immediate refresh is needed.
 

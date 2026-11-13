@@ -150,6 +150,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 .sync-dot{height:7px;width:7px;border-radius:50%;background:#e6b56a;box-shadow:0 0 12px rgba(230,181,106,.3);flex:none}
 .sync-status[data-state="connected"] .sync-dot{background:var(--green);box-shadow:0 0 12px rgba(103,240,180,.65)}
 .sync-status[data-state="error"] .sync-dot{background:#ff8b9e;box-shadow:0 0 12px rgba(255,139,158,.4)}
+.sync-status[data-state="warning"] .sync-dot{background:#ffbf69;box-shadow:0 0 12px rgba(255,191,105,.48)}
 .sync-status>span:nth-child(2){display:flex;flex:1;flex-direction:column;min-width:0;line-height:1.45;gap:2px}
 .sync-status b{font-size:10px;font-weight:700}
 .sync-status small{color:var(--muted-2);font-size:8px;white-space:nowrap}

@@ -47,6 +47,7 @@ function assertValidTelegramHtml(html) {
 const env = {
   REPOS: 'owner/project',
   CHECK_SECRET: 'test-check-secret',
+  GITHUB_TOKEN: 'test-github-token',
   TELEGRAM_BOT_TOKEN: '123456:test-token',
   PUBLIC_SITE_ORIGIN: 'https://mehrdadmb2.github.io',
   NOTIFY_ON_FIRST_SEEN: 'false',
@@ -102,6 +103,7 @@ test('Worker stores a quiet baseline and notifies on a later release change', as
     const url = String(input);
     if (url.startsWith('https://api.github.com/repos/')) {
       githubCalls += 1;
+      assert.equal(new Headers(init.headers).get('Authorization'), 'Bearer test-github-token', 'all GitHub API requests must be authenticated');
       if (url.endsWith('/releases?per_page=20')) return jsonResponse([makeRelease(currentTag, 100), makeRelease('v0.9.0', 90)]);
       if (url.endsWith('/releases/latest')) return jsonResponse(makeRelease(currentTag, currentTag === 'v1.0.0' ? 100 : 200));
       return jsonResponse({
@@ -353,5 +355,158 @@ test('Worker protects manual check endpoints and reports health', async () => {
   const data = await health.json();
   assert.equal(data.ok, true);
   assert.equal(data.repositoryCount, 1);
+  assert.equal(data.githubAuthConfigured, true);
+  assert.equal(data.githubAuthMode, 'authenticated');
   assert.equal(data.scheduledCron, null);
+});
+
+test('scan refuses to contact GitHub when the Worker token is missing', async (t) => {
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let githubCalls = 0;
+  globalThis.fetch = async (input) => {
+    if (String(input).startsWith('https://api.github.com/')) githubCalls += 1;
+    throw new Error(`Unexpected network request: ${String(input)}`);
+  };
+  const tokenlessEnv = { ...env, GITHUB_TOKEN: undefined, REPOS: 'owner/project', RELEASES: new MemoryKV(), USERS: new MemoryKV() };
+  const ctx = { waitUntil(promise) { Promise.resolve(promise).catch(() => {}); } };
+  const response = await worker.fetch(new Request('https://worker.test/check', {
+    method: 'POST', headers: { 'X-Check-Secret': tokenlessEnv.CHECK_SECRET },
+  }), tokenlessEnv, ctx);
+  const body = await response.json();
+  assert.equal(response.status, 503);
+  assert.equal(body.ok, false);
+  assert.equal(body.code, 'GITHUB_TOKEN_REQUIRED');
+  assert.match(body.error, /GITHUB_TOKEN/);
+  assert.equal(githubCalls, 0, 'tokenless scans must fail before calling GitHub');
+});
+
+test('primary GitHub rate limit stops the scan immediately without retrying or burning more requests', async (t) => {
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let githubCalls = 0;
+  globalThis.fetch = async (input) => {
+    githubCalls += 1;
+    return new Response(JSON.stringify({ message: 'API rate limit exceeded for shared egress IP.' }), {
+      status: 403,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-RateLimit-Limit': '60',
+        'X-RateLimit-Remaining': '0',
+        'X-RateLimit-Reset': String(Math.floor(Date.now() / 1000) + 3600),
+        'X-RateLimit-Resource': 'core',
+      },
+    });
+  };
+  const limitedEnv = {
+    ...env,
+    REPOS: 'owner/first,owner/second,owner/third',
+    RELEASES: new MemoryKV(),
+    USERS: new MemoryKV(),
+  };
+  const ctx = { waitUntil(promise) { Promise.resolve(promise).catch(() => {}); } };
+  const response = await worker.fetch(new Request('https://worker.test/check', {
+    method: 'POST', headers: { 'X-Check-Secret': limitedEnv.CHECK_SECRET },
+  }), limitedEnv, ctx);
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.rateLimited, true);
+  assert.equal(body.failed, 1);
+  assert.equal(body.metadataFailed, 1);
+  assert.equal(body.repositories.length, 1, 'the scan must stop at the first exhausted primary quota');
+  assert.equal(body.repositories[0].status, 'rate-limited');
+  assert.equal(githubCalls, 1, 'no retries or requests for later repositories are allowed');
+});
+
+test('ETag cache reuses stored GitHub payloads when the API returns 304', async (t) => {
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const release = {
+    id: 100, tag_name: 'v1.0.0', name: 'Release v1.0.0',
+    html_url: 'https://github.com/owner/etag-project/releases/tag/v1.0.0',
+    published_at: '2026-11-01T10:00:00Z', created_at: '2026-11-01T10:00:00Z',
+    draft: false, prerelease: false, body: 'Initial release', assets: [],
+  };
+  const metadata = {
+    full_name: 'owner/etag-project', description: 'ETag cached project',
+    html_url: 'https://github.com/owner/etag-project', visibility: 'public',
+    stargazers_count: 10, forks_count: 2, watchers_count: 3, open_issues_count: 1,
+    size: 100, default_branch: 'main', language: 'JavaScript', license: { spdx_id: 'MIT' },
+    topics: ['etag'], created_at: '2020-01-01T00:00:00Z', updated_at: '2026-11-01T10:00:00Z',
+    pushed_at: '2026-11-01T10:00:00Z',
+  };
+  const cacheEnv = {
+    ...env,
+    REPOS: 'owner/etag-project',
+    RELEASES: new MemoryKV({
+      'release:owner/etag-project': JSON.stringify({
+        tag: 'v1.0.0', name: 'Release v1.0.0',
+        htmlUrl: release.html_url, publishedAt: release.published_at, releaseId: 100,
+        prerelease: false, previousTag: null,
+      }),
+      'history:owner/etag-project': JSON.stringify([{ tag: 'v1.0.0', previousTag: null, changeType: 'baseline' }]),
+    }),
+    USERS: new MemoryKV(),
+  };
+  let conditionalCalls = 0;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    const requestHeaders = new Headers(init.headers);
+    if (url.endsWith('/releases/latest')) {
+      if (requestHeaders.get('If-None-Match') === '"release-etag"') {
+        conditionalCalls += 1;
+        return new Response(null, { status: 304 });
+      }
+      return new Response(JSON.stringify(release), { headers: { 'Content-Type': 'application/json', ETag: '"release-etag"' } });
+    }
+    if (url.endsWith('/owner/etag-project')) {
+      if (requestHeaders.get('If-None-Match') === '"metadata-etag"') {
+        conditionalCalls += 1;
+        return new Response(null, { status: 304 });
+      }
+      return new Response(JSON.stringify(metadata), { headers: { 'Content-Type': 'application/json', ETag: '"metadata-etag"' } });
+    }
+    throw new Error(`Unexpected ETag test URL: ${url}`);
+  };
+  const ctx = { waitUntil(promise) { Promise.resolve(promise).catch(() => {}); } };
+  for (let i = 0; i < 2; i += 1) {
+    const response = await worker.fetch(new Request('https://worker.test/check', {
+      method: 'POST', headers: { 'X-Check-Secret': cacheEnv.CHECK_SECRET },
+    }), cacheEnv, ctx);
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.failed, 0);
+  }
+  assert.equal(conditionalCalls, 2, 'the second scan should use two conditional requests and accept 304 responses');
+});
+
+
+test('GitHub permission errors stop the scan and report the missing read permission', async (t) => {
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let githubCalls = 0;
+  globalThis.fetch = async () => {
+    githubCalls += 1;
+    return new Response(JSON.stringify({ message: 'Resource not accessible by personal access token' }), {
+      status: 403,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Accepted-GitHub-Permissions': 'contents=read,metadata=read',
+      },
+    });
+  };
+  const permissionEnv = {
+    ...env,
+    REPOS: 'owner/first,owner/second',
+    RELEASES: new MemoryKV(),
+    USERS: new MemoryKV(),
+  };
+  const ctx = { waitUntil(promise) { Promise.resolve(promise).catch(() => {}); } };
+  const response = await worker.fetch(new Request('https://worker.test/check', {
+    method: 'POST', headers: { 'X-Check-Secret': permissionEnv.CHECK_SECRET },
+  }), permissionEnv, ctx);
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.githubAuthFailed, true);
+  assert.equal(body.githubAuthErrorCode, 'GITHUB_PERMISSION_DENIED');
+  assert.equal(body.repositories.length, 1);
+  assert.equal(githubCalls, 1, 'permission failures must not be repeated for every repository');
+  assert.match(body.repositories[0].error, /contents=read,metadata=read/);
 });
